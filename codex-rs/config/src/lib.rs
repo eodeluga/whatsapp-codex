@@ -31,6 +31,7 @@ pub mod test_support;
 mod thread_config;
 mod tui_keymap;
 pub mod types;
+pub mod whatsapp;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 
@@ -157,6 +158,7 @@ pub use state::ConfigLayerStack;
 pub use state::ConfigLayerStackOrdering;
 pub use state::ConfigLoadOptions;
 pub use state::LoaderOverrides;
+pub use state::redacted_config_layer;
 pub use strict_config::config_error_from_ignored_toml_fields;
 pub use thread_config::NoopThreadConfigLoader;
 pub use thread_config::RemoteThreadConfigLoader;
@@ -170,3 +172,9 @@ pub use thread_config::ThreadConfigLoaderFuture;
 pub use thread_config::ThreadConfigSource;
 pub use thread_config::UserThreadConfig;
 pub use toml::Value as TomlValue;
+pub use whatsapp::OpenWaConfigToml;
+pub use whatsapp::WhatsAppBridgeConfigToml;
+pub use whatsapp::WhatsAppConfigError;
+pub use whatsapp::WhatsAppConfigToml;
+pub use whatsapp::canonical_e164;
+pub use whatsapp::load_user_whatsapp_config;

@@ -1,5 +1,5 @@
+use crate::config_layer::config_layer_entry_to_api;
 use crate::config_layer::config_layer_metadata_to_api;
-use crate::config_layer::config_layer_to_api;
 use crate::config_manager::ConfigManager;
 use codex_app_server_protocol::Config as ApiConfig;
 use codex_app_server_protocol::ConfigBatchWriteParams;
@@ -137,6 +137,9 @@ impl ConfigManager {
             .requirements_toml()
             .apply_exact_to_config(&mut effective_config_toml);
         effective_config_toml.allow_login_shell.get_or_insert(true);
+        if let Some(whatsapp) = effective_config_toml.whatsapp.as_mut() {
+            *whatsapp = whatsapp.redacted();
+        }
 
         let json_value = serde_json::to_value(&effective_config_toml)
             .map_err(|err| ConfigManagerError::json("failed to serialize configuration", err))?;
@@ -164,8 +167,8 @@ impl ConfigManager {
                         ConfigLayerStackOrdering::HighestPrecedenceFirst,
                         /*include_disabled*/ true,
                     )
-                    .iter()
-                    .map(|layer| config_layer_to_api(layer.as_layer()))
+                    .into_iter()
+                    .map(config_layer_entry_to_api)
                     .collect()
             }),
         })
