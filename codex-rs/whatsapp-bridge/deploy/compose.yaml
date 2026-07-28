@@ -1,0 +1,28 @@
+services:
+  openwa:
+    image: ${OPENWA_IMAGE:-rmyndharis/openwa:1.0.0}
+    environment:
+      OPENWA_ENGINE: whatsapp-web.js
+    ports:
+      - "127.0.0.1:2785:2785"
+    volumes:
+      - openwa-data:/app/data
+    networks: [bridge]
+
+  codex-whatsapp-bridge:
+    image: ${CODEX_WHATSAPP_BRIDGE_IMAGE:-codex-whatsapp-bridge:local}
+    user: "${UID}:${GID}"
+    command: ["codex-whatsapp-bridge", "--config", "/codex-home/config.toml"]
+    volumes:
+      - ${CODEX_HOME}/config.toml:/codex-home/config.toml:ro
+      - ${CODEX_HOME}/whatsapp:/codex-home/whatsapp
+      - ${CODEX_HOME}/app-server-control:/codex-home/app-server-control
+    networks: [bridge]
+    depends_on: [openwa]
+
+networks:
+  bridge:
+    internal: true
+
+volumes:
+  openwa-data:
