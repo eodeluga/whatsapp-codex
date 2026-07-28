@@ -33,6 +33,8 @@ result
 CLAUDE.md
 .claude/
 AGENTS.override.md
+PLAN.md
+LOCAL-AGENTS.md
 
 # caches
 .cache/
