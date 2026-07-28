@@ -99,6 +99,27 @@ exclude = ["LEGACY_*"]
 }
 
 #[test]
+fn project_layers_cannot_define_whatsapp() {
+    let layer = ConfigLayerEntry::new(
+        ConfigLayerSource::Project {
+            dot_codex_folder: AbsolutePathBuf::from_absolute_path("/untrusted/.codex")
+                .expect("project path should be absolute"),
+        },
+        toml::from_str("[whatsapp]\nenabled = false\n").expect("project config"),
+    );
+
+    let error = ConfigLayerStack::new(
+        vec![layer],
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect_err("project WhatsApp settings must be rejected");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("[whatsapp] is allowed only"));
+}
+
+#[test]
 fn enabled_layers_only_validate_representation_sensitive_shell_policy_fields() {
     let cases = [
         r#"shell_environment_policy = 17"#,
