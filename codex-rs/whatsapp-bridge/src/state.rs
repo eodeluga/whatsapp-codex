@@ -1,0 +1,214 @@
+//! Durable, bounded bridge state.
+
+use serde::Deserialize;
+use serde::Serialize;
+use std::collections::BTreeMap;
+use std::io;
+use std::path::Path;
+use std::path::PathBuf;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+use thiserror::Error;
+
+pub const STATE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeState {
+    pub schema_version: u32,
+    pub binding: Option<ThreadBinding>,
+    pub active_turn: Option<ActiveTurn>,
+    #[serde(default)]
+    pub queued_prompts: Vec<QueuedPrompt>,
+    #[serde(default)]
+    pub outbox: Vec<OutboundMessage>,
+    #[serde(default)]
+    pub processed_events: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub outbound_message_ids: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadBinding {
+    pub openwa_session_id: String,
+    pub self_chat_id: String,
+    pub codex_thread_id: String,
+    pub workspace: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveTurn {
+    pub inbound_message_id: String,
+    pub codex_turn_id: String,
+    pub working_output_message_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueuedPrompt {
+    pub idempotency_key: String,
+    pub message_id: String,
+    pub body: String,
+    pub accepted_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundMessage {
+    pub response_id: String,
+    pub chat_id: String,
+    pub body: String,
+    pub attempts: u32,
+}
+
+#[derive(Debug, Error)]
+pub enum StateError {
+    #[error("unsupported bridge state schema")]
+    UnsupportedSchema,
+    #[error("failed to read bridge state")]
+    Read,
+    #[error("failed to parse bridge state")]
+    Parse,
+    #[error("failed to persist bridge state")]
+    Write,
+}
+
+impl BridgeState {
+    pub fn empty() -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            ..Self::default()
+        }
+    }
+
+    pub fn load(path: &Path) -> Result<Self, StateError> {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                let state: Self = serde_json::from_slice(&bytes).map_err(|_| StateError::Parse)?;
+                if state.schema_version != STATE_SCHEMA_VERSION {
+                    return Err(StateError::UnsupportedSchema);
+                }
+                Ok(state)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::empty()),
+            Err(_) => Err(StateError::Read),
+        }
+    }
+
+    pub fn save(&self, path: &Path) -> Result<(), StateError> {
+        let parent = path.parent().ok_or(StateError::Write)?;
+        std::fs::create_dir_all(parent).map_err(|_| StateError::Write)?;
+        let bytes = serde_json::to_vec_pretty(self).map_err(|_| StateError::Write)?;
+        let temporary = path.with_extension("json.tmp");
+        write_synced(&temporary, &bytes).map_err(|_| StateError::Write)?;
+        std::fs::rename(&temporary, path).map_err(|_| StateError::Write)?;
+        sync_directory(parent).map_err(|_| StateError::Write)
+    }
+
+    pub fn mark_processed(&mut self, key: String, timestamp: u64) {
+        self.processed_events.insert(key, timestamp);
+    }
+
+    pub fn was_processed(&self, key: &str) -> bool {
+        self.processed_events.contains_key(key)
+    }
+
+    pub fn prune(&mut self, now: u64, ttl_hours: u64, capacity: usize) {
+        let minimum = now.saturating_sub(ttl_hours.saturating_mul(60 * 60));
+        prune_records(&mut self.processed_events, minimum, capacity);
+        prune_records(&mut self.outbound_message_ids, minimum, capacity);
+    }
+}
+
+fn prune_records(records: &mut BTreeMap<String, u64>, minimum: u64, capacity: usize) {
+    records.retain(|_, timestamp| *timestamp >= minimum);
+    while records.len() > capacity {
+        let Some(key) = records
+            .iter()
+            .min_by_key(|(_, timestamp)| *timestamp)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        records.remove(&key);
+    }
+}
+
+fn write_synced(path: &Path, contents: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+
+    let mut file = std::fs::File::create(path)?;
+    set_private_permissions(&file)?;
+    file.write_all(contents)?;
+    file.sync_all()
+}
+
+#[cfg(unix)]
+fn set_private_permissions(file: &std::fs::File) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_private_permissions(_file: &std::fs::File) -> io::Result<()> {
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(path)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+pub fn unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn persists_and_prunes_deduplication_records() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut state = BridgeState::empty();
+        state.mark_processed("old".to_string(), 1);
+        state.mark_processed("new".to_string(), 100);
+        state.prune(100, 1, 1);
+        state.save(&path).unwrap();
+
+        let loaded = BridgeState::load(&path).unwrap();
+        assert_eq!(
+            loaded.processed_events.keys().collect::<Vec<_>>(),
+            vec![&"new".to_string()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        BridgeState::empty().save(&path).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}

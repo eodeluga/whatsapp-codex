@@ -126,6 +126,7 @@ members = [
     "codex-experimental-api-macros",
     "plugin",
     "model-provider",
+    "whatsapp-bridge",
 ]
 resolver = "2"
 

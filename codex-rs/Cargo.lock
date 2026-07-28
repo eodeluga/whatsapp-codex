@@ -4556,6 +4556,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-whatsapp-bridge"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "codex-app-server-client",
+ "codex-app-server-protocol",
+ "codex-config",
+ "codex-utils-absolute-path",
+ "futures",
+ "hmac 0.12.1",
+ "pretty_assertions",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "codex-windows-sandbox"
 version = "0.0.0"
 dependencies = [
