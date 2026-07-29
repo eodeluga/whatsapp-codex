@@ -1,81 +1,240 @@
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# WhatsApp Codex
 
----
+WhatsApp Codex is a self-hosted coding agent that lets you use one private
+WhatsApp self-chat to control a normal Codex app-server thread. OpenWA owns the
+WhatsApp session; the bridge handles signed webhooks, durable delivery, queueing,
+approvals, and the existing Codex app-server protocol. It does not run a second
+agent loop.
 
 ## Quickstart
 
-### Installing and running Codex CLI
+### Prerequisites
 
-Run the following on Mac or Linux to install Codex CLI:
+- Linux or macOS with a current Rust toolchain.
+- Docker Engine with Docker Compose v2.
+- A WhatsApp account and a private self-chat.
+- A workspace directory that the host Codex app-server can access.
 
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
-```
+All commands below are run from the repository root unless stated otherwise.
 
-Run the following on Windows to install Codex CLI:
-
-```shell
-powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
-```
-
-The standalone installers download from `https://releases.openai.com/codex` by default and fall back to GitHub Releases if a metadata or asset download is unavailable. To force GitHub Releases, set `CODEX_INSTALLER_USE_RELEASES_OPENAI_COM` to `false` (`0` and `no` are also accepted):
+### 1. Build WhatsApp Codex
 
 ```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=false sh
+cd codex-rs
+cargo build --release -p codex-cli -p codex-whatsapp-bridge
+cd ..
 ```
 
-```powershell
-$env:CODEX_INSTALLER_USE_RELEASES_OPENAI_COM='false'; irm https://chatgpt.com/codex/install.ps1 | iex
-```
+The binaries are created at `codex-rs/target/release/codex` and
+`codex-rs/target/release/codex-whatsapp-bridge`.
 
-Codex CLI can also be installed via the following package managers:
+### 2. Prepare deployment settings
 
 ```shell
-# Install using npm
-npm install -g @openai/codex
+cp codex-rs/whatsapp-bridge/deploy/.env.example \
+  codex-rs/whatsapp-bridge/deploy/.env
 ```
+
+Edit `.env` and set `CODEX_HOME` to the host Codex home directory, plus the
+numeric `UID` and `GID` that own it. Keep OpenWA credentials and the webhook
+signing secret out of `.env`; they belong in `$CODEX_HOME/config.toml`.
+
+### 3. Start OpenWA and link WhatsApp
 
 ```shell
-# Install using Homebrew
-brew install --cask codex
+docker compose \
+  --env-file codex-rs/whatsapp-bridge/deploy/.env \
+  -f codex-rs/whatsapp-bridge/deploy/compose.yaml build
+
+docker compose \
+  --env-file codex-rs/whatsapp-bridge/deploy/.env \
+  -f codex-rs/whatsapp-bridge/deploy/compose.yaml up -d openwa
 ```
 
-Then simply run `codex` to get started.
+Read the initial OpenWA administrator key:
 
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
+```shell
+docker compose \
+  --env-file codex-rs/whatsapp-bridge/deploy/.env \
+  -f codex-rs/whatsapp-bridge/deploy/compose.yaml exec openwa \
+  sh -c 'cat /app/data/.api-key'
+```
 
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
+Use that key temporarily as `OPENWA_ADMIN_KEY` to create and start a session:
 
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
+```shell
+export OPENWA_ADMIN_KEY='replace-with-the-admin-key'
 
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
+curl -sS -X POST http://127.0.0.1:2785/api/sessions \
+  -H "X-API-Key: $OPENWA_ADMIN_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"codex-personal"}'
 
-</details>
+curl -sS -X POST \
+  http://127.0.0.1:2785/api/sessions/SESSION_ID/start \
+  -H "X-API-Key: $OPENWA_ADMIN_KEY"
 
-### Using Codex with your ChatGPT plan
+curl -sS \
+  http://127.0.0.1:2785/api/sessions/SESSION_ID/qr \
+  -H "X-API-Key: $OPENWA_ADMIN_KEY"
+```
 
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
+Scan the QR code in WhatsApp. Then create a session-scoped operator key; the
+plaintext key is returned only once:
 
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
+```shell
+curl -sS -X POST http://127.0.0.1:2785/api/auth/api-keys \
+  -H "X-API-Key: $OPENWA_ADMIN_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name":"WhatsApp Codex bridge",
+    "role":"operator",
+    "allowedSessions":["SESSION_ID"]
+  }'
+```
 
-## Docs
+Replace `SESSION_ID` in the commands with the ID returned by OpenWA. OpenWA is
+pinned to an upstream commit in
+[`compose.yaml`](codex-rs/whatsapp-bridge/deploy/compose.yaml), uses the
+`whatsapp-web.js` engine, and keeps its session data in a named volume.
 
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
+### 4. Configure the WhatsApp integration
+
+Start the locally built Codex TUI:
+
+```shell
+./codex-rs/target/release/codex
+```
+
+Complete the WhatsApp setup step with:
+
+- your own WhatsApp number in canonical E.164 form, such as `+447700900000`;
+- the OpenWA session ID;
+- the session-scoped operator key;
+- the host workspace Codex should use.
+
+The TUI generates the webhook signing secret, masks credentials, shows a
+redacted review, and writes the complete table to the base user config. A
+“Not now” choice writes `enabled = false` and prevents the step from returning.
+
+For a manual configuration, add this to `$CODEX_HOME/config.toml` and replace
+the example values:
+
+```toml
+[whatsapp]
+onboarding_complete = true
+enabled = true
+account_phone_number = "+447700900000"
+workspace = "/absolute/path/to/workspace"
+trigger_prefix = "!codex "
+
+[whatsapp.openwa]
+api_base_url = "http://openwa:2785/api"
+session_id = "SESSION_ID"
+api_key = "session-scoped-operator-key"
+webhook_signing_secret = "at-least-32-random-bytes-encoded-as-base64url"
+webhook_url = "http://codex-whatsapp-bridge:8787/webhooks/openwa"
+
+[whatsapp.bridge]
+app_server_endpoint = "unix:///codex-home/app-server-control/app-server-control.sock"
+listen = "0.0.0.0:8787"
+state_path = "/codex-home/whatsapp/state.json"
+max_queued_prompts = 20
+output_chunk_chars = 3500
+edit_interval_ms = 1500
+dedupe_capacity = 10000
+dedupe_ttl_hours = 168
+```
+
+Protect this file. It contains the OpenWA API key and webhook secret and should
+not be committed or shared. On Unix, WhatsApp Codex restricts it and the bridge
+state file to mode `0600`.
+
+### 5. Start Codex app-server
+
+Keep this process running on the host so Codex can access the real workspace,
+credentials, and sandbox:
+
+```shell
+./codex-rs/target/release/codex app-server --listen unix://
+```
+
+The deployment mounts the app-server control-socket directory into the bridge
+container. The workspace itself is not mounted into the bridge.
+
+### 6. Start the WhatsApp Codex bridge
+
+```shell
+docker compose \
+  --env-file codex-rs/whatsapp-bridge/deploy/.env \
+  -f codex-rs/whatsapp-bridge/deploy/compose.yaml \
+  up -d codex-whatsapp-bridge
+```
+
+The bridge checks the OpenWA session state and account number, updates or
+creates the signed webhook, resumes the persisted Codex thread, and exposes
+health endpoints. OpenWA is published only on loopback; the bridge remains on
+the private Compose network.
+
+### 7. Use WhatsApp Codex
+
+Send messages from the configured self-chat using the exact prefix:
+
+```text
+!codex status
+!codex inspect the current workspace
+!codex approve TOKEN
+!codex deny TOKEN
+!codex answer TOKEN your answer
+!codex stop
+!codex new
+!codex help
+```
+
+Prompts received during an active turn are queued in FIFO order. Command and
+file-change approvals remain pending until answered. Responses are chunked for
+WhatsApp and delivered back to the same self-chat without triggering a loop.
+
+## Recovery and health
+
+```shell
+docker compose \
+  --env-file codex-rs/whatsapp-bridge/deploy/.env \
+  -f codex-rs/whatsapp-bridge/deploy/compose.yaml \
+  exec codex-whatsapp-bridge codex-whatsapp-bridge --healthcheck
+
+docker compose \
+  --env-file codex-rs/whatsapp-bridge/deploy/.env \
+  -f codex-rs/whatsapp-bridge/deploy/compose.yaml \
+  logs openwa codex-whatsapp-bridge
+```
+
+Bridge state is stored at `$CODEX_HOME/whatsapp/state.json`. It contains the
+thread binding, deduplication records, queued prompts, outbound IDs, and
+undelivered responses. If app-server disconnects, prompts remain durable and
+reconnect uses bounded backoff. If OpenWA disconnects, final responses remain
+in the outbox and are retried without restarting the Codex turn.
+
+For a restart check, stop and restart OpenWA, the host app-server, and the
+bridge in that order. Confirm that `!codex status` reports the same thread and
+that a replayed webhook does not create a second turn.
+
+## Development and documentation
+
+From `codex-rs`, use the repository workflows rather than invoking `cargo test`
+directly:
+
+```shell
+just fmt
+just test -p codex-whatsapp-bridge
+just test -p codex-config
+just test -p codex-tui
+```
+
+Detailed bridge deployment notes are in
+[`codex-rs/whatsapp-bridge/README.md`](codex-rs/whatsapp-bridge/README.md).
+General repository development guidance is in
+[`docs/contributing.md`](docs/contributing.md) and
+[`docs/install.md`](docs/install.md).
 
 This repository is licensed under the [Apache-2.0 License](LICENSE).
