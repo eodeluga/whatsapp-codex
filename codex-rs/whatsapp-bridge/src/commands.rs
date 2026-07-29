@@ -23,8 +23,19 @@ pub fn parse_command(prefix: &str, message: &str) -> Option<BridgeCommand> {
         "new" => Some(BridgeCommand::New),
         "status" => Some(BridgeCommand::Status),
         "stop" => Some(BridgeCommand::Stop),
-        _ => parse_reserved(command).or_else(|| Some(BridgeCommand::Prompt(suffix.to_string()))),
+        "help" => Some(BridgeCommand::Help),
+        _ if is_reserved_name(command.split_whitespace().next().unwrap_or_default()) => {
+            parse_reserved(command).or(Some(BridgeCommand::Help))
+        }
+        _ => Some(BridgeCommand::Prompt(suffix.to_string())),
     }
+}
+
+fn is_reserved_name(name: &str) -> bool {
+    matches!(
+        name,
+        "approve" | "approve-session" | "deny" | "answer" | "help" | "new" | "status" | "stop"
+    )
 }
 
 fn parse_reserved(command: &str) -> Option<BridgeCommand> {
@@ -50,23 +61,5 @@ fn parse_reserved(command: &str) -> Option<BridgeCommand> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use pretty_assertions::assert_eq;
-
-    #[test]
-    fn prefix_is_exact_and_commands_take_precedence() {
-        assert_eq!(parse_command("!codex ", "!Codex status"), None);
-        assert_eq!(
-            parse_command("!codex ", "!codex status"),
-            Some(BridgeCommand::Status)
-        );
-        assert_eq!(
-            parse_command("!codex ", "!codex approve-session abc"),
-            Some(BridgeCommand::Approve {
-                token: "abc".to_string(),
-                session: true
-            })
-        );
-    }
-}
+#[path = "commands_tests.rs"]
+mod tests;

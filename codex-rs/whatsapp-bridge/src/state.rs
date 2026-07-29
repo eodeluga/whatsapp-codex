@@ -13,10 +13,12 @@ use thiserror::Error;
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BridgeState {
     pub schema_version: u32,
     pub binding: Option<ThreadBinding>,
+    #[serde(default)]
+    pub orphaned_thread_id: Option<String>,
     pub active_turn: Option<ActiveTurn>,
     #[serde(default)]
     pub queued_prompts: Vec<QueuedPrompt>,
@@ -29,7 +31,7 @@ pub struct BridgeState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ThreadBinding {
     pub openwa_session_id: String,
     pub self_chat_id: String,
@@ -38,24 +40,28 @@ pub struct ThreadBinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ActiveTurn {
     pub inbound_message_id: String,
+    #[serde(default)]
+    pub thread_id: String,
     pub codex_turn_id: String,
     pub working_output_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QueuedPrompt {
     pub idempotency_key: String,
     pub message_id: String,
     pub body: String,
     pub accepted_at: u64,
+    #[serde(default)]
+    pub submission_uncertain: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OutboundMessage {
     pub response_id: String,
     pub chat_id: String,
@@ -86,6 +92,7 @@ impl BridgeState {
     pub fn load(path: &Path) -> Result<Self, StateError> {
         match std::fs::read(path) {
             Ok(bytes) => {
+                set_path_private_permissions(path).map_err(|_| StateError::Read)?;
                 let state: Self = serde_json::from_slice(&bytes).map_err(|_| StateError::Parse)?;
                 if state.schema_version != STATE_SCHEMA_VERSION {
                     return Err(StateError::UnsupportedSchema);
@@ -115,6 +122,14 @@ impl BridgeState {
         self.processed_events.contains_key(key)
     }
 
+    pub fn was_sent_by_bridge(&self, message_id: &str) -> bool {
+        self.outbound_message_ids.contains_key(message_id)
+    }
+
+    pub fn mark_outbound(&mut self, message_id: String, timestamp: u64) {
+        self.outbound_message_ids.insert(message_id, timestamp);
+    }
+
     pub fn prune(&mut self, now: u64, ttl_hours: u64, capacity: usize) {
         let minimum = now.saturating_sub(ttl_hours.saturating_mul(60 * 60));
         prune_records(&mut self.processed_events, minimum, capacity);
@@ -134,6 +149,18 @@ fn prune_records(records: &mut BTreeMap<String, u64>, minimum: u64, capacity: us
         };
         records.remove(&key);
     }
+}
+
+#[cfg(unix)]
+fn set_path_private_permissions(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_path_private_permissions(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn write_synced(path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -176,39 +203,5 @@ pub fn unix_timestamp() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn persists_and_prunes_deduplication_records() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("state.json");
-        let mut state = BridgeState::empty();
-        state.mark_processed("old".to_string(), 1);
-        state.mark_processed("new".to_string(), 100);
-        state.prune(100, 1, 1);
-        state.save(&path).unwrap();
-
-        let loaded = BridgeState::load(&path).unwrap();
-        assert_eq!(
-            loaded.processed_events.keys().collect::<Vec<_>>(),
-            vec![&"new".to_string()]
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn state_file_is_private() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("state.json");
-        BridgeState::empty().save(&path).unwrap();
-
-        assert_eq!(
-            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
-}
+#[path = "state_tests.rs"]
+mod tests;

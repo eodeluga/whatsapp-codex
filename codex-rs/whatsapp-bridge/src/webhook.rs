@@ -3,21 +3,22 @@
 use hmac::Hmac;
 use hmac::Mac;
 use serde::Deserialize;
+use serde::Serialize;
 use sha2::Sha256;
 use thiserror::Error;
 
 type HmacSha256 = Hmac<Sha256>;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenWaWebhook {
     pub event: String,
     pub session_id: String,
     pub idempotency_key: Option<String>,
-    pub data: OpenWaMessage,
+    pub data: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenWaMessage {
     pub id: String,
@@ -79,36 +80,37 @@ pub fn filter_inbound(
 ) -> Option<InboundMessage> {
     if !matches!(webhook.event.as_str(), "message.received" | "message.sent")
         || webhook.session_id != session_id
-        || webhook.data.message_type != "chat"
-        || webhook.data.is_group
-        || outbound_message_ids(&webhook.data.id)
-        || !webhook.data.body.starts_with(trigger_prefix)
     {
         return None;
     }
-    let chat_id = normalized_chat_id(&webhook.data.from, &webhook.data.to)?;
+    let message = serde_json::from_value::<OpenWaMessage>(webhook.data).ok()?;
+    if message.message_type != "chat"
+        || message.is_group
+        || outbound_message_ids(&message.id)
+        || !message.body.starts_with(trigger_prefix)
+    {
+        return None;
+    }
+    let chat_id = normalized_chat_id(&message.from, &message.to)?;
     if chat_id != self_chat_id {
         return None;
     }
     Some(InboundMessage {
         idempotency_key: webhook
             .idempotency_key
-            .unwrap_or_else(|| webhook.data.id.clone()),
-        message_id: webhook.data.id,
+            .unwrap_or_else(|| message.id.clone()),
+        message_id: message.id,
         chat_id,
-        body: webhook.data.body,
+        body: message.body,
     })
 }
 
 fn normalized_chat_id(from: &str, to: &str) -> Option<String> {
-    [from, to]
-        .into_iter()
-        .find(|id| id.ends_with("@c.us"))
-        .map(str::to_owned)
+    (from == to && from.ends_with("@c.us")).then(|| from.to_string())
 }
 
 fn hex_decode(value: &str) -> Result<Vec<u8>, ()> {
-    if !value.len().is_multiple_of(2) {
+    if !value.is_ascii() || !value.len().is_multiple_of(2) {
         return Err(());
     }
     (0..value.len())
@@ -118,24 +120,5 @@ fn hex_decode(value: &str) -> Result<Vec<u8>, ()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn verifies_raw_body_and_filters_a_self_chat_message() {
-        let body = br#"{"event":"message.received","sessionId":"s","idempotencyKey":"key","data":{"id":"m","from":"447700900000@c.us","to":"447700900000@c.us","body":"!codex hello","type":"chat","isGroup":false}}"#;
-        let mut mac = HmacSha256::new_from_slice(b"secret").unwrap();
-        mac.update(body);
-        let signature = mac
-            .finalize()
-            .into_bytes()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        let webhook = parse_verified_webhook(b"secret", &signature, body).unwrap();
-        let inbound =
-            filter_inbound(webhook, "s", "447700900000@c.us", "!codex ", |_| false).unwrap();
-        assert_eq!(inbound.idempotency_key, "key");
-        assert!(parse_verified_webhook(b"secret", "00", body).is_err());
-    }
-}
+#[path = "webhook_tests.rs"]
+mod tests;
