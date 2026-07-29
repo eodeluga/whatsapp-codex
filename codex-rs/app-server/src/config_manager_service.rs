@@ -430,6 +430,16 @@ impl ConfigManager {
                 .apply()
                 .await
                 .map_err(|err| ConfigManagerError::anyhow("failed to persist config.toml", err))?;
+            if parsed_segments
+                .iter()
+                .any(|segments| matches!(segments.first(), Some(segment) if segment == "whatsapp"))
+            {
+                set_private_config_permissions(provided_path.as_path())
+                    .await
+                    .map_err(|err| {
+                        ConfigManagerError::io("failed to restrict config.toml permissions", err)
+                    })?;
+            }
         }
 
         let overridden = first_overridden_edit(&updated_layers, &effective, &parsed_segments);
@@ -461,6 +471,18 @@ impl ConfigManager {
     async fn load_thread_agnostic_config(&self) -> std::io::Result<ConfigLayerStack> {
         self.load_config_layers(/*cwd*/ None).await
     }
+}
+
+#[cfg(unix)]
+async fn set_private_config_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await
+}
+
+#[cfg(not(unix))]
+async fn set_private_config_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 async fn create_empty_user_layer(

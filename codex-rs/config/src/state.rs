@@ -17,6 +17,7 @@ use crate::whatsapp::redact_whatsapp_toml_value;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
 use toml::Value as TomlValue;
@@ -104,7 +105,7 @@ impl LoaderOverrides {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct ConfigLayerEntry {
     pub name: ConfigLayerSource,
     pub config: TomlValue,
@@ -112,6 +113,28 @@ pub struct ConfigLayerEntry {
     pub disabled_reason: Option<String>,
     raw_toml: Option<RawTomlLayer>,
     hooks_config_folder_override: Option<AbsolutePathBuf>,
+}
+
+impl fmt::Debug for ConfigLayerEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut config = self.config.clone();
+        redact_whatsapp_toml_value(&mut config);
+        formatter
+            .debug_struct("ConfigLayerEntry")
+            .field("name", &self.name)
+            .field("config", &config)
+            .field("version", &self.version)
+            .field("disabled_reason", &self.disabled_reason)
+            .field(
+                "raw_toml",
+                &self.raw_toml.as_ref().map(|_| "[redacted raw TOML]"),
+            )
+            .field(
+                "hooks_config_folder_override",
+                &self.hooks_config_folder_override,
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

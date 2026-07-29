@@ -30,6 +30,7 @@ pub const DEFAULT_DEDUPE_TTL_HOURS: u64 = 168;
 
 /// Top-level `[whatsapp]` settings stored exclusively in the base user config.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct WhatsAppConfigToml {
     #[serde(default)]
@@ -45,6 +46,7 @@ pub struct WhatsAppConfigToml {
 
 /// OpenWA connection and webhook settings.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct OpenWaConfigToml {
     pub api_base_url: Option<String>,
@@ -56,6 +58,7 @@ pub struct OpenWaConfigToml {
 
 /// Local bridge runtime settings.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct WhatsAppBridgeConfigToml {
     pub app_server_endpoint: Option<String>,
@@ -115,6 +118,8 @@ pub enum WhatsAppConfigError {
     InvalidPhoneNumber,
     #[error("OpenWA API base URL must include /api")]
     InvalidOpenWaApiBaseUrl,
+    #[error("OpenWA webhook URL must be an absolute HTTP(S) URL")]
+    InvalidOpenWaWebhookUrl,
     #[error("OpenWA session ID and API key must be non-empty")]
     InvalidOpenWaCredentials,
     #[error("WhatsApp webhook signing secret must contain at least 32 random bytes")]
@@ -125,6 +130,10 @@ pub enum WhatsAppConfigError {
     EmptyTriggerPrefix,
     #[error("WhatsApp queue and output limits must be positive")]
     InvalidLimits,
+    #[error("WhatsApp bridge state path must be absolute")]
+    InvalidStatePath,
+    #[error("WhatsApp bridge listen address must be a socket address")]
+    InvalidListenAddress,
     #[error("failed to read WhatsApp configuration")]
     Read,
     #[error("failed to parse WhatsApp configuration")]
@@ -133,12 +142,25 @@ pub enum WhatsAppConfigError {
 
 impl WhatsAppConfigToml {
     pub fn is_complete(&self) -> bool {
-        self.enabled && self.validate().is_ok()
+        self.onboarding_complete && (!self.enabled || self.validate().is_ok())
     }
 
     /// Validates only local configuration. It intentionally does not contact
     /// OpenWA or app-server so onboarding can complete while they are offline.
     pub fn validate(&self) -> Result<(), WhatsAppConfigError> {
+        self.validate_inner(WorkspaceValidation::RequireExisting)
+    }
+
+    /// Validates bridge-visible settings without requiring the host workspace
+    /// to be mounted into the bridge container.
+    pub fn validate_for_bridge(&self) -> Result<(), WhatsAppConfigError> {
+        self.validate_inner(WorkspaceValidation::AbsoluteOnly)
+    }
+
+    fn validate_inner(
+        &self,
+        workspace_validation: WorkspaceValidation,
+    ) -> Result<(), WhatsAppConfigError> {
         if !self.enabled {
             return Ok(());
         }
@@ -153,7 +175,10 @@ impl WhatsAppConfigToml {
             .workspace
             .as_deref()
             .ok_or(WhatsAppConfigError::Incomplete)?;
-        if !workspace.is_absolute() || !workspace.is_dir() {
+        if !workspace.is_absolute()
+            || matches!(workspace_validation, WorkspaceValidation::RequireExisting)
+                && !workspace.is_dir()
+        {
             return Err(WhatsAppConfigError::InvalidWorkspace);
         }
         if self.trigger_prefix().is_empty() {
@@ -163,8 +188,11 @@ impl WhatsAppConfigToml {
             .openwa
             .as_ref()
             .ok_or(WhatsAppConfigError::Incomplete)?;
-        if !openwa.api_base_url().ends_with("/api") {
+        if !is_http_url(openwa.api_base_url(), Some("/api")) {
             return Err(WhatsAppConfigError::InvalidOpenWaApiBaseUrl);
+        }
+        if !is_http_url(openwa.webhook_url(), None) {
+            return Err(WhatsAppConfigError::InvalidOpenWaWebhookUrl);
         }
         if openwa.session_id.as_deref().is_none_or(str::is_empty)
             || openwa.api_key.as_deref().is_none_or(str::is_empty)
@@ -176,7 +204,11 @@ impl WhatsAppConfigToml {
         }
         let bridge = self.bridge.as_ref().cloned().unwrap_or_default();
         let endpoint = bridge.app_server_endpoint();
-        if !endpoint.starts_with("unix://") && !bridge.allow_tcp_app_server {
+        let valid_endpoint = endpoint
+            .strip_prefix("unix://")
+            .is_some_and(|path| Path::new(path).is_absolute())
+            || bridge.allow_tcp_app_server && is_websocket_url(endpoint);
+        if !valid_endpoint {
             return Err(WhatsAppConfigError::InvalidAppServerEndpoint);
         }
         if bridge.max_queued_prompts() == 0
@@ -184,8 +216,15 @@ impl WhatsAppConfigToml {
             || bridge.edit_interval_ms() == 0
             || bridge.dedupe_capacity() == 0
             || bridge.dedupe_ttl_hours() == 0
+            || bridge.output_chunk_chars() > 4_000
         {
             return Err(WhatsAppConfigError::InvalidLimits);
+        }
+        if !bridge.state_path().is_absolute() {
+            return Err(WhatsAppConfigError::InvalidStatePath);
+        }
+        if bridge.listen().parse::<std::net::SocketAddr>().is_err() {
+            return Err(WhatsAppConfigError::InvalidListenAddress);
         }
         Ok(())
     }
@@ -218,6 +257,33 @@ impl WhatsAppConfigToml {
         }
         redacted
     }
+}
+
+#[derive(Clone, Copy)]
+enum WorkspaceValidation {
+    AbsoluteOnly,
+    RequireExisting,
+}
+
+fn is_http_url(value: &str, required_path_suffix: Option<&str>) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && url.host().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && required_path_suffix.is_none_or(|suffix| url.path().ends_with(suffix))
+}
+
+fn is_websocket_url(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    matches!(url.scheme(), "ws" | "wss")
+        && url.host().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
 }
 
 impl OpenWaConfigToml {

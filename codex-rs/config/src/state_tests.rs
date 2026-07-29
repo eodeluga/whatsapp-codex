@@ -120,6 +120,31 @@ fn project_layers_cannot_define_whatsapp() {
 }
 
 #[test]
+fn config_layer_debug_redacts_whatsapp_secrets_and_raw_toml() {
+    let raw = r#"
+[whatsapp.openwa]
+api_key = "operator-secret"
+webhook_signing_secret = "webhook-secret"
+"#;
+    let layer = ConfigLayerEntry::new_with_raw_toml(
+        ConfigLayerSource::User {
+            file: AbsolutePathBuf::from_absolute_path("/codex-home/config.toml")
+                .expect("absolute config path"),
+            profile: None,
+        },
+        toml::from_str(raw).expect("user config"),
+        raw.to_string(),
+        AbsolutePathBuf::from_absolute_path("/codex-home").expect("absolute path"),
+    );
+
+    let debug = format!("{layer:?}");
+    assert!(!debug.contains("operator-secret"));
+    assert!(!debug.contains("webhook-secret"));
+    assert!(debug.contains("[redacted]"));
+    assert!(debug.contains("[redacted raw TOML]"));
+}
+
+#[test]
 fn enabled_layers_only_validate_representation_sensitive_shell_policy_fields() {
     let cases = [
         r#"shell_environment_policy = 17"#,
