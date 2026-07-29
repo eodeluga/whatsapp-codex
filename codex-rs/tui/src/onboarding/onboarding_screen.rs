@@ -43,6 +43,7 @@ use crate::onboarding::keys;
 use crate::onboarding::trust_directory::TrustDirectorySelection;
 use crate::onboarding::trust_directory::TrustDirectoryWidget;
 use crate::onboarding::welcome::WelcomeWidget;
+use crate::onboarding::whatsapp::WhatsAppWidget;
 use crate::tui::FrameRequester;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
@@ -55,6 +56,7 @@ enum Step {
     Welcome(WelcomeWidget),
     Auth(AuthModeWidget),
     TrustDirectory(TrustDirectoryWidget),
+    WhatsApp(WhatsAppWidget),
 }
 
 pub(crate) trait KeyboardHandler {
@@ -76,6 +78,7 @@ pub(crate) trait StepStateProvider {
 pub(crate) struct OnboardingScreen {
     request_frame: FrameRequester,
     steps: Vec<Step>,
+    config_path: std::path::PathBuf,
     is_done: bool,
     should_exit: bool,
 }
@@ -83,6 +86,7 @@ pub(crate) struct OnboardingScreen {
 pub(crate) struct OnboardingScreenArgs {
     pub show_trust_screen: bool,
     pub show_login_screen: bool,
+    pub show_whatsapp_screen: bool,
     pub login_status: LoginStatus,
     pub app_server_request_handle: Option<AppServerRequestHandle>,
     pub config: Config,
@@ -90,6 +94,7 @@ pub(crate) struct OnboardingScreenArgs {
 
 pub(crate) struct OnboardingResult {
     pub directory_trust_persisted: bool,
+    pub whatsapp_config_persisted: bool,
     pub should_exit: bool,
 }
 
@@ -106,11 +111,22 @@ impl OnboardingScreen {
         let OnboardingScreenArgs {
             show_trust_screen,
             show_login_screen,
+            show_whatsapp_screen,
             login_status,
             app_server_request_handle,
             config,
         } = args;
         let cwd = config.cwd.to_path_buf();
+        let config_path = config
+            .codex_home
+            .join(codex_config::CONFIG_TOML_FILE)
+            .to_path_buf();
+        let whatsapp_config = config
+            .config_layer_stack
+            .get_active_user_layer()
+            .and_then(|layer| layer.config.get("whatsapp"))
+            .cloned()
+            .and_then(|value| value.try_into().ok());
         let forced_login_method = config.forced_login_method;
         let mut steps: Vec<Step> = Vec::new();
         steps.push(Step::Welcome(WelcomeWidget::new(
@@ -151,7 +167,7 @@ impl OnboardingScreen {
                 .map(Into::into)
                 .unwrap_or_else(|| cwd.clone());
             steps.push(Step::TrustDirectory(TrustDirectoryWidget {
-                cwd,
+                cwd: cwd.clone(),
                 trust_target,
                 show_windows_create_sandbox_hint,
                 should_quit: false,
@@ -160,9 +176,13 @@ impl OnboardingScreen {
                 error: None,
             }))
         }
+        if show_whatsapp_screen {
+            steps.push(Step::WhatsApp(WhatsAppWidget::new(cwd, whatsapp_config)));
+        }
         Self {
             request_frame: tui.frame_requester(),
             steps,
+            config_path,
             is_done: false,
             should_exit: false,
         }
@@ -203,7 +223,7 @@ impl OnboardingScreen {
         // material so terminal selection is not interrupted by redraws.
         self.current_steps().into_iter().any(|step| match step {
             Step::Auth(widget) => widget.should_suppress_animations(),
-            Step::Welcome(_) | Step::TrustDirectory(_) => false,
+            Step::Welcome(_) | Step::TrustDirectory(_) | Step::WhatsApp(_) => false,
         })
     }
 
@@ -236,7 +256,7 @@ impl OnboardingScreen {
     fn auth_widget_mut(&mut self) -> Option<&mut AuthModeWidget> {
         self.steps.iter_mut().find_map(|step| match step {
             Step::Auth(widget) => Some(widget),
-            Step::Welcome(_) | Step::TrustDirectory(_) => None,
+            Step::Welcome(_) | Step::TrustDirectory(_) | Step::WhatsApp(_) => None,
         })
     }
 
@@ -288,7 +308,8 @@ impl KeyboardHandler for OnboardingScreen {
         let api_key_entry_context = self.api_key_entry_context();
         let should_quit = key_event.kind == KeyEventKind::Press
             && keys::QUIT.is_pressed(key_event)
-            && !suppress_quit_while_typing_api_key(key_event, api_key_entry_context);
+            && !suppress_quit_while_typing_api_key(key_event, api_key_entry_context)
+            && !self.whatsapp_is_typing_printable(key_event);
         if should_quit {
             if self.is_auth_in_progress() {
                 self.cancel_auth_if_active();
@@ -334,6 +355,19 @@ impl KeyboardHandler for OnboardingScreen {
     }
 }
 
+impl OnboardingScreen {
+    fn whatsapp_is_typing_printable(&self, key_event: KeyEvent) -> bool {
+        matches!(key_event.code, KeyCode::Char(_))
+            && !key_event
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && self
+                .steps
+                .iter()
+                .any(|step| matches!(step, Step::WhatsApp(widget) if widget.is_text_entry_active()))
+    }
+}
+
 /// Returns `true` when a quit shortcut should be ignored as text input.
 ///
 /// This only applies while API-key entry is active and the key is a printable
@@ -360,6 +394,7 @@ impl WidgetRef for &OnboardingScreen {
                 Step::Welcome(widget) => widget.set_animations_suppressed(suppress_animations),
                 Step::Auth(widget) => widget.set_animations_suppressed(suppress_animations),
                 Step::TrustDirectory(_) => {}
+                Step::WhatsApp(_) => {}
             }
         }
 
@@ -433,6 +468,7 @@ impl KeyboardHandler for Step {
             Step::Welcome(widget) => widget.handle_key_event(key_event),
             Step::Auth(widget) => widget.handle_key_event(key_event),
             Step::TrustDirectory(widget) => widget.handle_key_event(key_event),
+            Step::WhatsApp(widget) => widget.handle_key_event(key_event),
         }
     }
 
@@ -441,6 +477,7 @@ impl KeyboardHandler for Step {
             Step::Welcome(_) => {}
             Step::Auth(widget) => widget.handle_paste(pasted),
             Step::TrustDirectory(widget) => widget.handle_paste(pasted),
+            Step::WhatsApp(widget) => widget.handle_paste(pasted),
         }
     }
 }
@@ -451,6 +488,7 @@ impl StepStateProvider for Step {
             Step::Welcome(w) => w.get_step_state(),
             Step::Auth(w) => w.get_step_state(),
             Step::TrustDirectory(w) => w.get_step_state(),
+            Step::WhatsApp(w) => w.get_step_state(),
         }
     }
 }
@@ -467,6 +505,9 @@ impl WidgetRef for Step {
             Step::TrustDirectory(widget) => {
                 widget.render_ref(area, buf);
             }
+            Step::WhatsApp(widget) => {
+                widget.render_ref(area, buf);
+            }
         }
     }
 }
@@ -481,6 +522,7 @@ pub(crate) async fn run_onboarding_app(
     let app_server_request_handle = args.app_server_request_handle.clone();
     let mut onboarding_screen = OnboardingScreen::new(tui, args).await;
     let mut directory_trust_persisted = false;
+    let mut whatsapp_config_persisted = false;
     // One-time guard to fully clear the screen after ChatGPT login success message is shown
     let mut did_full_clear_after_success = false;
 
@@ -500,6 +542,13 @@ pub(crate) async fn run_onboarding_app(
                             onboarding_screen.handle_key_event(key_event);
                             if !directory_trust_persisted {
                                 directory_trust_persisted = persist_selected_trust(
+                                    &mut onboarding_screen,
+                                    app_server_request_handle.clone(),
+                                )
+                                .await;
+                            }
+                            if !whatsapp_config_persisted {
+                                whatsapp_config_persisted = persist_whatsapp_config(
                                     &mut onboarding_screen,
                                     app_server_request_handle.clone(),
                                 )
@@ -570,8 +619,60 @@ pub(crate) async fn run_onboarding_app(
     }
     Ok(OnboardingResult {
         directory_trust_persisted,
+        whatsapp_config_persisted,
         should_exit: onboarding_screen.should_exit(),
     })
+}
+
+async fn persist_whatsapp_config(
+    onboarding_screen: &mut OnboardingScreen,
+    request_handle: Option<AppServerRequestHandle>,
+) -> bool {
+    let Some((step_index, config)) =
+        onboarding_screen
+            .steps
+            .iter_mut()
+            .enumerate()
+            .find_map(|(index, step)| {
+                if let Step::WhatsApp(widget) = step {
+                    widget.take_save_request().map(|config| (index, config))
+                } else {
+                    None
+                }
+            })
+    else {
+        return false;
+    };
+    let result = match request_handle {
+        Some(request_handle) => match serde_json::to_value(config) {
+            Ok(value) => crate::config_update::write_user_config_batch(
+                request_handle,
+                &onboarding_screen.config_path,
+                vec![crate::config_update::replace_config_value(
+                    "whatsapp", value,
+                )],
+            )
+            .await
+            .map(|_| ()),
+            Err(error) => Err(error.into()),
+        },
+        None => Err(color_eyre::eyre::eyre!("app server unavailable")),
+    };
+    let Step::WhatsApp(widget) = &mut onboarding_screen.steps[step_index] else {
+        return false;
+    };
+    let saved = match result {
+        Ok(_) => {
+            widget.mark_saved();
+            true
+        }
+        Err(error) => {
+            widget.mark_save_failed(format_config_error(&error));
+            false
+        }
+    };
+    onboarding_screen.request_frame.schedule_frame();
+    saved
 }
 
 async fn persist_selected_trust(
@@ -699,6 +800,7 @@ mod tests {
                 highlighted: TrustDirectorySelection::Trust,
                 error: None,
             })],
+            config_path: PathBuf::from("/codex-home/config.toml"),
             is_done: false,
             should_exit: false,
         };

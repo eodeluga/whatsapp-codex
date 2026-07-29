@@ -1445,6 +1445,7 @@ async fn run_ratatui_app(
         let onboarding_result = run_onboarding_app(
             OnboardingScreenArgs {
                 show_login_screen,
+                show_whatsapp_screen: should_show_whatsapp_screen(&initial_config),
                 show_trust_screen: should_show_trust_screen_flag,
                 login_status,
                 app_server_request_handle: app_server
@@ -1495,6 +1496,7 @@ async fn run_ratatui_app(
         // If the user made an explicit trust decision, or we showed the login flow, reload config
         // so current process state reflects persisted trust/auth changes.
         if onboarding_result.directory_trust_persisted
+            || onboarding_result.whatsapp_config_persisted
             || (show_login_screen && !uses_remote_workspace)
         {
             load_config_or_exit(
@@ -2025,7 +2027,19 @@ fn should_show_onboarding(
         return true;
     }
 
-    should_show_login_screen(login_status, config)
+    should_show_login_screen(login_status, config) || should_show_whatsapp_screen(config)
+}
+
+fn should_show_whatsapp_screen(config: &Config) -> bool {
+    let whatsapp = config
+        .config_layer_stack
+        .get_active_user_layer()
+        .and_then(|layer| layer.config.get("whatsapp"))
+        .cloned()
+        .and_then(|value| value.try_into::<codex_config::WhatsAppConfigToml>().ok());
+    !whatsapp
+        .as_ref()
+        .is_some_and(codex_config::WhatsAppConfigToml::is_complete)
 }
 
 fn should_show_login_screen(login_status: LoginStatus, config: &Config) -> bool {
