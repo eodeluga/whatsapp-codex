@@ -16,20 +16,19 @@ Compose hostname `codex-whatsapp-bridge` allowlisted for webhook delivery.
 ```bash
 cd codex-rs
 cargo build --locked --release -p codex-whatsapp-bridge
-cp whatsapp-bridge/deploy/.env.example whatsapp-bridge/deploy/.env
-# Set CODEX_HOME, UID, and GID in .env. Do not put credentials there.
-docker compose --env-file whatsapp-bridge/deploy/.env \
-  -f whatsapp-bridge/deploy/compose.yaml build
-docker compose --env-file whatsapp-bridge/deploy/.env \
-  -f whatsapp-bridge/deploy/compose.yaml up -d openwa
+docker compose -f whatsapp-bridge/deploy/compose.yaml build
+docker compose -f whatsapp-bridge/deploy/compose.yaml up -d openwa
 ```
+
+The deployment defaults to the normal Codex home directory, `~/.codex`.
+`CODEX_HOME`, `UID`, and `GID` are advanced overrides only; credentials always
+belong in the standard Codex `config.toml`, never in an environment file.
 
 OpenWA writes its initial admin key to `/app/data/.api-key` and prints it once
 in its startup log. Keep it private:
 
 ```bash
-docker compose --env-file whatsapp-bridge/deploy/.env \
-  -f whatsapp-bridge/deploy/compose.yaml exec openwa \
+docker compose -f whatsapp-bridge/deploy/compose.yaml exec openwa \
   sh -c 'cat /app/data/.api-key'
 ```
 
@@ -92,8 +91,7 @@ Start app-server on the host, then the bridge:
 
 ```bash
 codex app-server --listen unix://
-docker compose --env-file whatsapp-bridge/deploy/.env \
-  -f whatsapp-bridge/deploy/compose.yaml up -d codex-whatsapp-bridge
+docker compose -f whatsapp-bridge/deploy/compose.yaml up -d codex-whatsapp-bridge
 ```
 
 The bridge validates that the OpenWA session is `ready`, that its phone matches
@@ -127,11 +125,9 @@ is retried without restarting the Codex turn.
 Check health and logs with:
 
 ```bash
-docker compose --env-file whatsapp-bridge/deploy/.env \
-  -f whatsapp-bridge/deploy/compose.yaml exec codex-whatsapp-bridge \
+docker compose -f whatsapp-bridge/deploy/compose.yaml exec codex-whatsapp-bridge \
   codex-whatsapp-bridge --healthcheck
-docker compose --env-file whatsapp-bridge/deploy/.env \
-  -f whatsapp-bridge/deploy/compose.yaml logs openwa codex-whatsapp-bridge
+docker compose -f whatsapp-bridge/deploy/compose.yaml logs openwa codex-whatsapp-bridge
 ```
 
 The bridge container is intentionally not published to the host by default.

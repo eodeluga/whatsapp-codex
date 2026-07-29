@@ -28,26 +28,22 @@ cd ..
 The binaries are created at `codex-rs/target/release/codex` and
 `codex-rs/target/release/codex-whatsapp-bridge`.
 
-### 2. Prepare deployment settings
+### 2. Use the normal Codex configuration directory
 
-```shell
-cp codex-rs/whatsapp-bridge/deploy/.env.example \
-  codex-rs/whatsapp-bridge/deploy/.env
-```
+WhatsApp Codex uses the normal Codex home directory, `~/.codex` by default.
+The TUI creates and manages `~/.codex/config.toml`; OpenWA credentials and the
+webhook secret are stored there, never in a deployment environment file.
 
-Edit `.env` and set `CODEX_HOME` to the host Codex home directory, plus the
-numeric `UID` and `GID` that own it. Keep OpenWA credentials and the webhook
-signing secret out of `.env`; they belong in `$CODEX_HOME/config.toml`.
+Advanced deployments may override the home directory with `CODEX_HOME` and the
+container user with `UID`/`GID`, but neither is part of normal setup.
 
 ### 3. Start OpenWA and link WhatsApp
 
 ```shell
 docker compose \
-  --env-file codex-rs/whatsapp-bridge/deploy/.env \
   -f codex-rs/whatsapp-bridge/deploy/compose.yaml build
 
 docker compose \
-  --env-file codex-rs/whatsapp-bridge/deploy/.env \
   -f codex-rs/whatsapp-bridge/deploy/compose.yaml up -d openwa
 ```
 
@@ -55,7 +51,6 @@ Read the initial OpenWA administrator key:
 
 ```shell
 docker compose \
-  --env-file codex-rs/whatsapp-bridge/deploy/.env \
   -f codex-rs/whatsapp-bridge/deploy/compose.yaml exec openwa \
   sh -c 'cat /app/data/.api-key'
 ```
@@ -166,7 +161,6 @@ container. The workspace itself is not mounted into the bridge.
 
 ```shell
 docker compose \
-  --env-file codex-rs/whatsapp-bridge/deploy/.env \
   -f codex-rs/whatsapp-bridge/deploy/compose.yaml \
   up -d codex-whatsapp-bridge
 ```
@@ -199,12 +193,10 @@ WhatsApp and delivered back to the same self-chat without triggering a loop.
 
 ```shell
 docker compose \
-  --env-file codex-rs/whatsapp-bridge/deploy/.env \
   -f codex-rs/whatsapp-bridge/deploy/compose.yaml \
   exec codex-whatsapp-bridge codex-whatsapp-bridge --healthcheck
 
 docker compose \
-  --env-file codex-rs/whatsapp-bridge/deploy/.env \
   -f codex-rs/whatsapp-bridge/deploy/compose.yaml \
   logs openwa codex-whatsapp-bridge
 ```

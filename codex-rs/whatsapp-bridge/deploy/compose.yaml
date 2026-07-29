@@ -29,12 +29,12 @@ services:
     build:
       context: ../..
       dockerfile: whatsapp-bridge/deploy/Dockerfile
-    user: "${UID}:${GID}"
+    user: "${UID:-1000}:${GID:-1000}"
     command: ["--config", "/codex-home/config.toml"]
     volumes:
-      - ${CODEX_HOME}/config.toml:/codex-home/config.toml:ro
-      - ${CODEX_HOME}/whatsapp:/codex-home/whatsapp
-      - ${CODEX_HOME}/app-server-control:/codex-home/app-server-control
+      - ${CODEX_HOME:-${HOME}/.codex}/config.toml:/codex-home/config.toml:ro
+      - ${CODEX_HOME:-${HOME}/.codex}/whatsapp:/codex-home/whatsapp
+      - ${CODEX_HOME:-${HOME}/.codex}/app-server-control:/codex-home/app-server-control
     networks: [bridge]
     depends_on:
       openwa:
