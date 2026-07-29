@@ -177,7 +177,11 @@ impl OnboardingScreen {
             }))
         }
         if show_whatsapp_screen {
-            steps.push(Step::WhatsApp(WhatsAppWidget::new(cwd, whatsapp_config)));
+            steps.push(Step::WhatsApp(WhatsAppWidget::new(
+                cwd,
+                config.codex_home.to_path_buf(),
+                whatsapp_config,
+            )));
         }
         Self {
             request_frame: tui.frame_requester(),

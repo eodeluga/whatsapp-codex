@@ -19,15 +19,15 @@ fn render(widget: &WhatsAppWidget) -> String {
 #[test]
 fn renders_setup_choice() {
     let directory = tempdir().unwrap();
-    let widget = WhatsAppWidget::new(directory.path().to_path_buf(), None);
+    let widget = WhatsAppWidget::new_for_test(directory.path().to_path_buf());
     insta::assert_snapshot!(render(&widget));
 }
 
 #[test]
 fn renders_validation_error() {
     let directory = tempdir().unwrap();
-    let mut widget = WhatsAppWidget::new(directory.path().to_path_buf(), None);
-    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let mut widget = WhatsAppWidget::new_for_test(directory.path().to_path_buf());
+    widget.stage = SetupStage::Field(0);
     widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     insta::assert_snapshot!(render(&widget));
 }
@@ -35,7 +35,7 @@ fn renders_validation_error() {
 #[test]
 fn renders_redacted_review() {
     let directory = tempdir().unwrap();
-    let mut widget = WhatsAppWidget::new(directory.path().to_path_buf(), None);
+    let mut widget = WhatsAppWidget::new_for_test(directory.path().to_path_buf());
     widget.phone_number = "+447700900000".to_string();
     widget.session_id = "personal".to_string();
     widget.api_key = "operator-secret".to_string();
@@ -48,7 +48,7 @@ fn renders_redacted_review() {
 #[test]
 fn renders_saved_state() {
     let directory = tempdir().unwrap();
-    let mut widget = WhatsAppWidget::new(directory.path().to_path_buf(), None);
+    let mut widget = WhatsAppWidget::new_for_test(directory.path().to_path_buf());
     widget.mark_saved();
     insta::assert_snapshot!(render(&widget));
 }
@@ -56,7 +56,7 @@ fn renders_saved_state() {
 #[test]
 fn renders_skipped_state_and_persists_opt_out() {
     let directory = tempdir().unwrap();
-    let mut widget = WhatsAppWidget::new(directory.path().to_path_buf(), None);
+    let mut widget = WhatsAppWidget::new_for_test(directory.path().to_path_buf());
     widget.highlighted = SetupChoice::NotNow;
     widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     let config = widget.take_save_request().unwrap();

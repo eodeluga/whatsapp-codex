@@ -20,6 +20,11 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::WidgetRef;
 use ratatui::widgets::Wrap;
 use std::path::PathBuf;
+use std::process::Command;
+use std::process::Stdio;
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
 
 use crate::key_hint::KeyBindingListExt;
 use crate::onboarding::keys;
@@ -41,10 +46,119 @@ enum SetupChoice {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SetupStage {
     Choice,
+    Preflight,
     Field(usize),
     Review,
     Saving,
     Saved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GatewayPreflight {
+    checks: Vec<GatewayCheck>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GatewayCheck {
+    label: &'static str,
+    detail: String,
+    passed: bool,
+}
+
+impl GatewayPreflight {
+    fn check(codex_home: &std::path::Path, workspace: &std::path::Path) -> Self {
+        let docker_cli = command_succeeds("docker", &["--version"]);
+        let docker_daemon = docker_cli && command_succeeds("docker", &["info"]);
+        let compose = docker_cli && command_succeeds("docker", &["compose", "version"]);
+        let codex_home_writable = if codex_home.exists() {
+            std::fs::metadata(codex_home)
+                .map(|metadata| !metadata.permissions().readonly())
+                .unwrap_or(false)
+        } else {
+            codex_home.parent().is_some_and(|parent| {
+                std::fs::metadata(parent)
+                    .map(|metadata| !metadata.permissions().readonly())
+                    .unwrap_or(false)
+            })
+        };
+        Self {
+            checks: vec![
+                GatewayCheck {
+                    label: "Docker",
+                    detail: if docker_cli {
+                        "available".to_string()
+                    } else {
+                        "not installed or not on PATH".to_string()
+                    },
+                    passed: docker_cli,
+                },
+                GatewayCheck {
+                    label: "Docker daemon",
+                    detail: if docker_daemon {
+                        "running and accessible".to_string()
+                    } else {
+                        "not running or current user cannot access it".to_string()
+                    },
+                    passed: docker_daemon,
+                },
+                GatewayCheck {
+                    label: "Docker Compose",
+                    detail: if compose {
+                        "v2 available".to_string()
+                    } else {
+                        "Docker Compose v2 is required".to_string()
+                    },
+                    passed: compose,
+                },
+                GatewayCheck {
+                    label: "Codex home",
+                    detail: if codex_home_writable {
+                        "writable".to_string()
+                    } else {
+                        "must be writable".to_string()
+                    },
+                    passed: codex_home_writable,
+                },
+                GatewayCheck {
+                    label: "Workspace",
+                    detail: if workspace.is_dir() {
+                        "valid".to_string()
+                    } else {
+                        "must be an existing directory".to_string()
+                    },
+                    passed: workspace.is_dir(),
+                },
+            ],
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        self.checks.iter().all(|check| check.passed)
+    }
+}
+
+fn command_succeeds(program: &str, arguments: &[&str]) -> bool {
+    let Ok(mut child) = Command::new(program)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 pub(crate) struct WhatsAppWidget {
@@ -55,13 +169,19 @@ pub(crate) struct WhatsAppWidget {
     session_id: String,
     api_key: String,
     webhook_secret: String,
+    codex_home: PathBuf,
+    preflight: Option<GatewayPreflight>,
     save_request: Option<WhatsAppConfigToml>,
     skipped: bool,
     error: Option<String>,
 }
 
 impl WhatsAppWidget {
-    pub(crate) fn new(current_workspace: PathBuf, existing: Option<WhatsAppConfigToml>) -> Self {
+    pub(crate) fn new(
+        current_workspace: PathBuf,
+        codex_home: PathBuf,
+        existing: Option<WhatsAppConfigToml>,
+    ) -> Self {
         let existing = existing.unwrap_or_default();
         let openwa = existing.openwa.unwrap_or_default();
         Self {
@@ -76,10 +196,32 @@ impl WhatsAppWidget {
             session_id: openwa.session_id.unwrap_or_default(),
             api_key: openwa.api_key.unwrap_or_default(),
             webhook_secret: generate_webhook_secret(),
+            codex_home,
+            preflight: None,
             save_request: None,
             skipped: false,
             error: None,
         }
+    }
+
+    #[cfg(test)]
+    fn new_for_test(current_workspace: PathBuf) -> Self {
+        let mut widget = Self::new(current_workspace.clone(), current_workspace, None);
+        widget.preflight = Some(GatewayPreflight {
+            checks: vec![GatewayCheck {
+                label: "Test",
+                detail: "ready".to_string(),
+                passed: true,
+            }],
+        });
+        widget
+    }
+
+    fn run_preflight(&mut self) {
+        self.preflight = Some(GatewayPreflight::check(
+            &self.codex_home,
+            PathBuf::from(&self.workspace).as_path(),
+        ));
     }
 
     pub(crate) fn take_save_request(&mut self) -> Option<WhatsAppConfigToml> {
@@ -186,10 +328,34 @@ impl KeyboardHandler for WhatsAppWidget {
                     self.highlighted = SetupChoice::NotNow;
                 } else if keys::CONFIRM.is_pressed(key_event) {
                     match self.highlighted {
-                        SetupChoice::Configure => self.stage = SetupStage::Field(0),
+                        SetupChoice::Configure => {
+                            self.run_preflight();
+                            self.stage = SetupStage::Preflight;
+                        }
                         SetupChoice::NotNow => {
                             self.begin_save(Self::disabled_value(), /*skipped*/ true);
                         }
+                    }
+                }
+            }
+            SetupStage::Preflight => {
+                if keys::CANCEL.is_pressed(key_event) {
+                    self.error = None;
+                    self.stage = SetupStage::Choice;
+                } else if keys::CONFIRM.is_pressed(key_event) {
+                    self.run_preflight();
+                    if self
+                        .preflight
+                        .as_ref()
+                        .is_some_and(GatewayPreflight::is_ready)
+                    {
+                        self.error = None;
+                        self.stage = SetupStage::Field(0);
+                    } else {
+                        self.error = Some(
+                            "WhatsApp needs the failed checks above. Fix them and press Enter to retry, or press Esc to continue without WhatsApp."
+                                .to_string(),
+                        );
                     }
                 }
             }
@@ -286,6 +452,28 @@ impl WidgetRef for &WhatsAppWidget {
                     ));
                 }
             }
+            SetupStage::Preflight => {
+                column.push("  Gateway preflight".bold());
+                column.push("");
+                if let Some(preflight) = &self.preflight {
+                    for check in &preflight.checks {
+                        let status = if check.passed {
+                            "ok".green()
+                        } else {
+                            "needs attention".red()
+                        };
+                        column.push(Line::from(vec![
+                            format!("  {}: ", check.label).into(),
+                            status,
+                            format!(" — {}", check.detail).dim(),
+                        ]));
+                    }
+                    if preflight.is_ready() {
+                        column.push("");
+                        column.push("  All checks passed. Press Enter to continue.".green());
+                    }
+                }
+            }
             SetupStage::Field(index) => {
                 let value = match index {
                     0 => self.phone_number.as_str(),
@@ -369,7 +557,7 @@ impl WidgetRef for &WhatsAppWidget {
         }
         if matches!(
             self.stage,
-            SetupStage::Choice | SetupStage::Field(_) | SetupStage::Review
+            SetupStage::Choice | SetupStage::Preflight | SetupStage::Field(_) | SetupStage::Review
         ) {
             column.push("");
             column.push("  Press Enter to continue".dim());
