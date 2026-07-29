@@ -1,28 +1,55 @@
 services:
   openwa:
-    image: ${OPENWA_IMAGE:-rmyndharis/openwa:1.0.0}
+    image: ${OPENWA_IMAGE:-openwa:82b2499dc13a}
+    build:
+      context: https://github.com/rmyndharis/OpenWA.git#82b2499dc13a93af922330e2be432174bf0e38a4
     environment:
-      OPENWA_ENGINE: whatsapp-web.js
+      ENGINE_TYPE: whatsapp-web.js
+      SSRF_ALLOWED_HOSTS: codex-whatsapp-bridge
     ports:
       - "127.0.0.1:2785:2785"
     volumes:
       - openwa-data:/app/data
-    networks: [bridge]
+    networks: [bridge, openwa-egress]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:2785/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
   codex-whatsapp-bridge:
     image: ${CODEX_WHATSAPP_BRIDGE_IMAGE:-codex-whatsapp-bridge:local}
+    build:
+      context: ../..
+      dockerfile: whatsapp-bridge/deploy/Dockerfile
     user: "${UID}:${GID}"
-    command: ["codex-whatsapp-bridge", "--config", "/codex-home/config.toml"]
+    command: ["--config", "/codex-home/config.toml"]
     volumes:
       - ${CODEX_HOME}/config.toml:/codex-home/config.toml:ro
       - ${CODEX_HOME}/whatsapp:/codex-home/whatsapp
       - ${CODEX_HOME}/app-server-control:/codex-home/app-server-control
     networks: [bridge]
-    depends_on: [openwa]
+    depends_on:
+      openwa:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "codex-whatsapp-bridge", "--healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    stop_grace_period: 20s
 
 networks:
   bridge:
     internal: true
+  openwa-egress:
 
 volumes:
   openwa-data:
