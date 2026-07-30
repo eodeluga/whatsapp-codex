@@ -11,8 +11,8 @@ agent loop.
 ### Prerequisites
 
 - Linux or macOS with a current Rust toolchain.
-- Docker Engine with Docker Compose v2.
-- A WhatsApp account and a private self-chat.
+- Docker Engine with Docker Compose v2, only if you enable WhatsApp.
+- A WhatsApp account and a private self-chat, only if you enable WhatsApp.
 - A workspace directory that the host Codex app-server can access.
 
 All commands below are run from the repository root unless stated otherwise.
@@ -28,16 +28,26 @@ cd ..
 The binaries are created at `codex-rs/target/release/codex` and
 `codex-rs/target/release/codex-whatsapp-bridge`.
 
-### 2. Use the normal Codex configuration directory
+### 2. Run Codex and complete first-run setup
 
-WhatsApp Codex uses the normal Codex home directory, `~/.codex` by default.
-The TUI creates and manages `~/.codex/config.toml`; OpenWA credentials and the
-webhook secret are stored there, never in a deployment environment file.
+```shell
+./codex-rs/target/release/codex
+```
 
-Advanced deployments may override the home directory with `CODEX_HOME` and the
-container user with `UID`/`GID`, but neither is part of normal setup.
+Codex creates and manages its normal configuration at `~/.codex/config.toml`
+(unless an advanced user explicitly overrides `CODEX_HOME`). Complete the
+single first-run TUI flow, then choose whether to enable WhatsApp.
 
-### 3. Start OpenWA and link WhatsApp
+Choosing **Not now** completes normal terminal Codex setup without requiring
+Docker. Choosing **Enable WhatsApp** runs an early preflight for Docker, the
+Docker daemon, Docker Compose, the Codex home directory, and the workspace.
+
+The intended release experience is for the TUI to start the gateway, guide QR
+pairing, and save all WhatsApp settings itself. The current checkout has the
+preflight and TUI configuration, but its gateway provisioning remains manual;
+follow the advanced setup below when testing it from source.
+
+### 3. Advanced: manually start OpenWA and link WhatsApp
 
 ```shell
 docker compose \
@@ -93,15 +103,10 @@ pinned to an upstream commit in
 [`compose.yaml`](codex-rs/whatsapp-bridge/deploy/compose.yaml), uses the
 `whatsapp-web.js` engine, and keeps its session data in a named volume.
 
-### 4. Configure the WhatsApp integration
+### 4. Enter the OpenWA session details in Codex
 
-Start the locally built Codex TUI:
-
-```shell
-./codex-rs/target/release/codex
-```
-
-Complete the WhatsApp setup step with:
+Run the TUI again only if you have not already completed its WhatsApp step.
+Enter:
 
 - your own WhatsApp number in canonical E.164 form, such as `+447700900000`;
 - the OpenWA session ID;
@@ -109,8 +114,9 @@ Complete the WhatsApp setup step with:
 - the host workspace Codex should use.
 
 The TUI generates the webhook signing secret, masks credentials, shows a
-redacted review, and writes the complete table to the base user config. A
-“Not now” choice writes `enabled = false` and prevents the step from returning.
+redacted review, and writes the complete table to the base user config. In the
+current source build, if you previously chose “Not now,” use the manual TOML
+configuration below to enable the gateway after provisioning OpenWA.
 
 For a manual configuration, add this to `$CODEX_HOME/config.toml` and replace
 the example values:
