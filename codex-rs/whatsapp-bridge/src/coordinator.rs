@@ -108,13 +108,11 @@ pub struct Coordinator<C, O> {
     openwa: O,
     state: BridgeState,
     state_path: PathBuf,
-    workspace: PathBuf,
     openwa_session_id: String,
     configured_phone: String,
     webhook_url: String,
     webhook_secret: String,
     self_chat_id: String,
-    trigger_prefix: String,
     output_chunk_chars: usize,
     edit_interval: std::time::Duration,
     max_queued_prompts: usize,
@@ -132,7 +130,6 @@ pub struct Coordinator<C, O> {
     last_edit_at: Option<tokio::time::Instant>,
     live_edit_disabled: bool,
     resume_failures: u8,
-    workspace_mismatch_reported: bool,
 }
 
 impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
@@ -142,13 +139,11 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
         openwa: O,
         state: BridgeState,
         state_path: PathBuf,
-        workspace: PathBuf,
         openwa_session_id: String,
         configured_phone: String,
         webhook_url: String,
         webhook_secret: String,
         self_chat_id: String,
-        trigger_prefix: String,
         output_chunk_chars: usize,
         edit_interval_ms: u64,
         max_queued_prompts: usize,
@@ -163,13 +158,11 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
             openwa,
             state,
             state_path,
-            workspace,
             openwa_session_id,
             configured_phone,
             webhook_url,
             webhook_secret,
             self_chat_id,
-            trigger_prefix,
             output_chunk_chars,
             edit_interval: std::time::Duration::from_millis(edit_interval_ms),
             max_queued_prompts,
@@ -187,7 +180,6 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
             last_edit_at: None,
             live_edit_disabled: false,
             resume_failures: 0,
-            workspace_mismatch_reported: false,
         }
     }
 
@@ -339,9 +331,8 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
             return true;
         };
         match self.codex.resume_thread(binding.codex_thread_id).await {
-            Ok(response) if response.cwd.as_path() == self.workspace => {
+            Ok(response) => {
                 self.resume_failures = 0;
-                self.workspace_mismatch_reported = false;
                 if let Some(active) = self.state.active_turn.clone() {
                     let matching_turn = response
                         .thread
@@ -399,14 +390,6 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
                     }
                 }
                 true
-            }
-            Ok(_) => {
-                if !self.workspace_mismatch_reported {
-                    self.send("[codex] Refusing to resume a thread whose workspace no longer matches the configured workspace.")
-                        .await;
-                    self.workspace_mismatch_reported = true;
-                }
-                false
             }
             Err(_) => {
                 self.resume_failures = self.resume_failures.saturating_add(1);
@@ -481,9 +464,7 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
         if self.state.was_sent_by_bridge(&message.message_id) {
             return Ok(None);
         }
-        let Some(command) = parse_command(&self.trigger_prefix, &message.body) else {
-            return Ok(None);
-        };
+        let command = parse_command(&message.body);
         let previous_state = self.state.clone();
         let now = unix_timestamp();
         self.state
@@ -552,7 +533,7 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
                 self.send("[codex] Stop or wait for the active turn before starting a new thread.")
                     .await;
             }
-            BridgeCommand::New => match self.codex.start_thread(&self.workspace).await {
+            BridgeCommand::New => match self.codex.start_thread().await {
                 Ok(thread_id) => {
                     if self.bind_thread(thread_id) {
                         self.send("[codex] Started a new thread.").await;
@@ -591,7 +572,7 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
         };
         let thread_id = match self.state.binding.as_ref() {
             Some(binding) => binding.codex_thread_id.clone(),
-            None => match self.codex.start_thread(&self.workspace).await {
+            None => match self.codex.start_thread().await {
                 Ok(thread_id) => {
                     if self.bind_thread(thread_id.clone()) {
                         thread_id
@@ -764,7 +745,6 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
             openwa_session_id: self.openwa_session_id.clone(),
             self_chat_id: self.self_chat_id.clone(),
             codex_thread_id: thread_id,
-            workspace: self.workspace.clone(),
         });
         if self.state.save(&self.state_path).is_err() {
             self.state.binding = previous_binding;
@@ -1032,11 +1012,9 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
                     },
                 );
                 self.send(&format!(
-                    "[codex] Approval {token}: run `{command}`{}{}\nReply `{}approve {token}` or `{}deny {token}`.",
+                    "[codex] Approval {token}: run `{command}`{}{}\nReply `/approve {token}` or `/deny {token}`.",
                     if reason.is_empty() { String::new() } else { format!(" ({reason})") },
                     params.cwd.map_or_else(String::new, |cwd| format!(" in `{cwd}`")),
-                    self.trigger_prefix,
-                    self.trigger_prefix,
                 )).await;
             }
             ServerRequest::FileChangeRequestApproval { request_id, params } => {
@@ -1062,9 +1040,8 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
                     },
                 );
                 self.send(&format!(
-                    "[codex] Approval {token}: allow {reason}{paths}{}.\nReply `{}approve {token}` or `{}deny {token}`.",
+                    "[codex] Approval {token}: allow {reason}{paths}{}.\nReply `/approve {token}` or `/deny {token}`.",
                     params.grant_root.map_or_else(String::new, |root| format!(" under `{}`", root.display())),
-                    self.trigger_prefix, self.trigger_prefix,
                 )).await;
             }
             ServerRequest::ToolRequestUserInput { request_id, params } => {
@@ -1105,8 +1082,8 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
                         format!("\nOptions:\n{rendered}")
                     });
                 self.send(&format!(
-                    "[codex] Question {token}: {}{}\nReply `{}answer {token} <your answer>`.",
-                    question.question, options, self.trigger_prefix,
+                    "[codex] Question {token}: {}{}\nReply `/answer {token} <your answer>`.",
+                    question.question, options,
                 ))
                 .await;
             }
@@ -1126,11 +1103,9 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
                     },
                 );
                 self.send(&format!(
-                    "[codex] Approval {token}: allow permissions {summary} for `{}`{}.\nReply `{}approve {token}` or `{}deny {token}`.",
+                    "[codex] Approval {token}: allow permissions {summary} for `{}`{}.\nReply `/approve {token}` or `/deny {token}`.",
                     params.cwd.as_path().display(),
                     params.reason.map_or_else(String::new, |reason| format!(" ({reason})")),
-                    self.trigger_prefix,
-                    self.trigger_prefix,
                 ))
                 .await;
             }
@@ -1377,7 +1352,6 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
     async fn send_help(&mut self) {
         self.send(&format!(
             "[codex] Commands: `{0}new`, `{0}status`, `{0}stop`, `{0}approve <token>`, `{0}approve-session <token>`, `{0}deny <token>`, and `{0}answer <token> <answer>`. Any other message beginning with `{0}` starts a Codex turn.",
-            self.trigger_prefix,
         )).await;
     }
 
@@ -1498,7 +1472,7 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
                     PendingRequest::Permissions { .. } => "permission approval",
                 });
         format!(
-            "[codex] app-server: {}; OpenWA: {}; state: {}; thread: {thread}; active turn: {active_turn}; queued: {}; pending: {pending}; workspace: {}",
+            "[codex] app-server: {}; OpenWA: {}; state: {}; thread: {thread}; active turn: {active_turn}; queued: {}; pending: {pending}",
             if self.app_server_connected {
                 "connected"
             } else {
@@ -1515,7 +1489,6 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
                 "failed"
             },
             self.state.queued_prompts.len(),
-            self.workspace.display()
         )
     }
 }

@@ -18,7 +18,6 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use std::path::Path;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 use thiserror::Error;
@@ -34,10 +33,7 @@ pub enum CodexError {
 /// Implementations preserve the app-server protocol's request and event
 /// semantics while allowing coordinator tests to use an in-memory fake.
 pub trait CodexClient: Send {
-    fn start_thread(
-        &self,
-        workspace: &Path,
-    ) -> impl std::future::Future<Output = Result<String, CodexError>> + Send;
+    fn start_thread(&self) -> impl std::future::Future<Output = Result<String, CodexError>> + Send;
 
     fn resume_thread(
         &self,
@@ -154,13 +150,12 @@ async fn connect_client(
 }
 
 impl CodexClient for RemoteCodexClient {
-    async fn start_thread(&self, workspace: &Path) -> Result<String, CodexError> {
+    async fn start_thread(&self) -> Result<String, CodexError> {
         let response: ThreadStartResponse = self
             .client()?
             .request_typed(ClientRequest::ThreadStart {
                 request_id: self.request_id(),
                 params: ThreadStartParams {
-                    cwd: Some(workspace.display().to_string()),
                     approvals_reviewer: Some(ApprovalsReviewer::User),
                     ephemeral: Some(false),
                     ..Default::default()

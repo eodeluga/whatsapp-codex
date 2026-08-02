@@ -13,7 +13,7 @@ fn verifies_raw_body_and_filters_a_self_chat_message() {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     let webhook = parse_verified_webhook(b"secret", &signature, body).unwrap();
-    let inbound = filter_inbound(webhook, "s", "447700900000@c.us", "!codex ", |_| false).unwrap();
+    let inbound = filter_inbound(webhook, "s", "447700900000@c.us", |_| false).unwrap();
     assert_eq!(inbound.idempotency_key, "key");
     assert!(parse_verified_webhook(b"secret", "00", body).is_err());
 }
@@ -36,7 +36,7 @@ fn rejects_a_sent_message_to_another_chat() {
     };
 
     assert_eq!(
-        filter_inbound(webhook, "s", "447700900000@c.us", "!codex ", |_| false),
+        filter_inbound(webhook, "s", "447700900000@c.us", |_| false),
         None
     );
 }
@@ -59,13 +59,8 @@ fn rejects_a_message_already_recorded_in_the_outbound_ledger() {
     };
 
     assert_eq!(
-        filter_inbound(
-            webhook,
-            "s",
-            "447700900000@c.us",
-            "!codex ",
-            |message_id| message_id == "bridge-message",
-        ),
+        filter_inbound(webhook, "s", "447700900000@c.us", |message_id| message_id
+            == "bridge-message",),
         None
     );
 }
@@ -84,7 +79,7 @@ fn safely_ignores_a_signed_session_status_event() {
     let webhook = parse_verified_webhook(b"secret", &signature, body).unwrap();
 
     assert_eq!(
-        filter_inbound(webhook, "s", "447700900000@c.us", "!codex ", |_| false),
+        filter_inbound(webhook, "s", "447700900000@c.us", |_| false),
         None
     );
 }

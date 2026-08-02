@@ -75,7 +75,6 @@ pub fn filter_inbound(
     webhook: OpenWaWebhook,
     session_id: &str,
     self_chat_id: &str,
-    trigger_prefix: &str,
     outbound_message_ids: impl Fn(&str) -> bool,
 ) -> Option<InboundMessage> {
     if !matches!(webhook.event.as_str(), "message.received" | "message.sent")
@@ -84,11 +83,7 @@ pub fn filter_inbound(
         return None;
     }
     let message = serde_json::from_value::<OpenWaMessage>(webhook.data).ok()?;
-    if message.message_type != "chat"
-        || message.is_group
-        || outbound_message_ids(&message.id)
-        || !message.body.starts_with(trigger_prefix)
-    {
+    if message.message_type != "chat" || message.is_group || outbound_message_ids(&message.id) {
         return None;
     }
     let chat_id = normalized_chat_id(&message.from, &message.to)?;

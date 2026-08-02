@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::routing::post;
 use codex_config::load_user_whatsapp_config;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_config::load_whatsapp_runtime_config;
 use codex_whatsapp_bridge::codex::CodexClient;
 use codex_whatsapp_bridge::codex::RemoteCodexClient;
 use codex_whatsapp_bridge::coordinator::Coordinator;
@@ -31,7 +31,6 @@ struct WebhookState {
     secret: Arc<Vec<u8>>,
     session_id: String,
     self_chat_id: String,
-    trigger_prefix: String,
     commands: mpsc::Sender<CoordinatorCommand>,
     ready: Arc<AtomicBool>,
 }
@@ -59,44 +58,29 @@ async fn main() -> anyhow::Result<()> {
     if !config.enabled {
         return Ok(());
     }
-    config.validate_for_bridge()?;
-    let openwa = config.openwa.as_ref().expect("validated OpenWA config");
-    let bridge = config.bridge.as_ref().cloned().unwrap_or_default();
-    let workspace = config.workspace.clone().expect("validated workspace");
+    config.validate()?;
+    let codex_home = config_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("WhatsApp config path has no parent directory"))?;
+    let runtime = load_whatsapp_runtime_config(codex_home)?;
     let self_chat_id = config.self_chat_jid()?;
-    let endpoint = bridge.app_server_endpoint();
-    let codex = if let Some(socket_path) = endpoint.strip_prefix("unix://") {
-        let socket_path = AbsolutePathBuf::from_absolute_path(socket_path)?;
-        match RemoteCodexClient::connect_unix(socket_path.clone()).await {
-            Ok(client) => client,
-            Err(_) => {
-                tracing::warn!(
-                    "Codex app-server is unavailable; bridge will retry in the background"
-                );
-                RemoteCodexClient::disconnected_unix(socket_path)
-            }
-        }
-    } else {
-        match RemoteCodexClient::connect_websocket(endpoint.to_string()).await {
-            Ok(client) => client,
-            Err(_) => {
-                tracing::warn!(
-                    "Codex app-server is unavailable; bridge will retry in the background"
-                );
-                RemoteCodexClient::disconnected_websocket(endpoint.to_string())
-            }
+    let socket_path = codex_app_server_client::app_server_control_socket_path(codex_home)?;
+    let codex = match RemoteCodexClient::connect_unix(socket_path.clone()).await {
+        Ok(client) => client,
+        Err(_) => {
+            tracing::warn!("Codex app-server is unavailable; bridge will retry in the background");
+            RemoteCodexClient::disconnected_unix(socket_path)
         }
     };
     let mut app_server_connected = codex.is_connected();
-    let state_path = bridge.state_path().to_path_buf();
+    let state_path = runtime.state_path.clone();
     let mut state = BridgeState::load(&state_path)?;
     if let Some(binding) = state.binding.clone() {
-        if binding.openwa_session_id != openwa.session_id.as_deref().expect("validated session ID")
+        if binding.openwa_session_id != runtime.openwa_session_id
             || binding.self_chat_id != self_chat_id
-            || binding.workspace != workspace
         {
             anyhow::bail!(
-                "persisted WhatsApp binding does not match the configured session, account, or workspace"
+                "persisted WhatsApp binding does not match the configured session or account"
             );
         }
         if let Some(active) = state.active_turn.as_mut()
@@ -107,13 +91,7 @@ async fn main() -> anyhow::Result<()> {
         }
         if app_server_connected {
             match codex.resume_thread(binding.codex_thread_id.clone()).await {
-                Ok(response) => {
-                    if response.cwd.as_path() != workspace {
-                        anyhow::bail!(
-                            "persisted Codex thread workspace does not match the configured workspace"
-                        );
-                    }
-                }
+                Ok(_) => {}
                 Err(_) => {
                     tracing::warn!(
                         "stored Codex thread could not be resumed; preserving it while the bridge retries"
@@ -124,9 +102,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     let openwa_client = HttpOpenWaClient::new(
-        openwa.api_base_url().to_string(),
-        openwa.session_id.clone().expect("validated session ID"),
-        openwa.api_key.clone().expect("validated API key"),
+        runtime.openwa_api_base_url.clone(),
+        runtime.openwa_session_id.clone(),
+        runtime.openwa_api_key.clone(),
     )?;
     let configured_phone = config
         .account_phone_number
@@ -134,10 +112,7 @@ async fn main() -> anyhow::Result<()> {
         .expect("validated phone number")
         .trim_start_matches('+')
         .to_string();
-    let webhook_secret = openwa
-        .webhook_signing_secret
-        .clone()
-        .expect("validated signing secret");
+    let webhook_secret = runtime.webhook_signing_secret.clone();
     let openwa_healthy = match openwa_client.session_status().await {
         Ok(session) => {
             if !session.status.eq_ignore_ascii_case("ready")
@@ -149,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("configured WhatsApp account does not match a ready OpenWA session");
             }
             let registered = openwa_client
-                .register_webhook(openwa.webhook_url().to_string(), webhook_secret.clone())
+                .register_webhook(runtime.webhook_url.clone(), webhook_secret.clone())
                 .await
                 .is_ok();
             if !registered {
@@ -170,18 +145,16 @@ async fn main() -> anyhow::Result<()> {
             openwa_client,
             state,
             state_path,
-            workspace,
-            openwa.session_id.clone().expect("validated session ID"),
+            runtime.openwa_session_id.clone(),
             configured_phone,
-            openwa.webhook_url().to_string(),
+            runtime.webhook_url.clone(),
             webhook_secret.clone(),
             self_chat_id.clone(),
-            config.trigger_prefix().to_string(),
-            bridge.output_chunk_chars(),
-            bridge.edit_interval_ms(),
-            bridge.max_queued_prompts(),
-            bridge.dedupe_capacity(),
-            bridge.dedupe_ttl_hours(),
+            runtime.output_chunk_chars,
+            runtime.edit_interval_ms,
+            runtime.max_queued_prompts,
+            runtime.dedupe_capacity,
+            runtime.dedupe_ttl_hours,
             Arc::clone(&ready),
             app_server_connected,
             openwa_healthy,
@@ -195,14 +168,13 @@ async fn main() -> anyhow::Result<()> {
         .layer(DefaultBodyLimit::max(64 * 1024))
         .with_state(WebhookState {
             secret: Arc::new(webhook_secret.into_bytes()),
-            session_id: openwa.session_id.clone().expect("validated session ID"),
+            session_id: runtime.openwa_session_id,
             self_chat_id,
-            trigger_prefix: config.trigger_prefix().to_string(),
             commands: commands.clone(),
             ready,
         });
-    let listener = tokio::net::TcpListener::bind(bridge.listen()).await?;
-    tracing::info!(listen = bridge.listen(), "WhatsApp bridge is ready");
+    let listener = tokio::net::TcpListener::bind(&runtime.bridge_listen).await?;
+    tracing::info!(listen = runtime.bridge_listen, "WhatsApp bridge is ready");
     let (shutdown_started, shutdown_wait) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
@@ -262,13 +234,8 @@ async fn openwa_webhook(
     let Ok(webhook) = parse_verified_webhook(&state.secret, signature, &body) else {
         return StatusCode::UNAUTHORIZED;
     };
-    let Some(message) = filter_inbound(
-        webhook,
-        &state.session_id,
-        &state.self_chat_id,
-        &state.trigger_prefix,
-        |_| false,
-    ) else {
+    let Some(message) = filter_inbound(webhook, &state.session_id, &state.self_chat_id, |_| false)
+    else {
         return StatusCode::NO_CONTENT;
     };
     let (accepted, accepted_rx) = tokio::sync::oneshot::channel();

@@ -2,21 +2,17 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[test]
-fn prefix_is_exact_and_commands_take_precedence() {
-    assert_eq!(parse_command("!codex ", "!Codex status"), None);
+fn plain_messages_are_prompts_and_standard_controls_are_recognized() {
     assert_eq!(
-        parse_command("!codex ", "!codex status"),
-        Some(BridgeCommand::Status)
+        parse_command("inspect the current project"),
+        BridgeCommand::Prompt("inspect the current project".to_string())
     );
+    assert_eq!(parse_command("/status"), BridgeCommand::Status);
     assert_eq!(
-        parse_command("!codex ", "!codex approve-session abc"),
-        Some(BridgeCommand::Approve {
+        parse_command("/approve abc"),
+        BridgeCommand::Approve {
             token: "abc".to_string(),
-            session: true
-        })
-    );
-    assert_eq!(
-        parse_command("!codex ", "!codex approve"),
-        Some(BridgeCommand::Help)
+            session: false
+        }
     );
 }

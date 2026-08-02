@@ -12,29 +12,35 @@ pub enum BridgeCommand {
     Help,
 }
 
-/// Parses a message only when it starts with the exact configured prefix.
-pub fn parse_command(prefix: &str, message: &str) -> Option<BridgeCommand> {
-    let suffix = message.strip_prefix(prefix)?;
-    let command = suffix.trim();
+/// Parses a first-class WhatsApp input message.
+pub fn parse_command(message: &str) -> BridgeCommand {
+    let command = message.trim();
     if command.is_empty() {
-        return Some(BridgeCommand::Help);
+        return BridgeCommand::Help;
     }
     match command {
-        "new" => Some(BridgeCommand::New),
-        "status" => Some(BridgeCommand::Status),
-        "stop" => Some(BridgeCommand::Stop),
-        "help" => Some(BridgeCommand::Help),
+        "/new" => BridgeCommand::New,
+        "/status" => BridgeCommand::Status,
+        "/stop" => BridgeCommand::Stop,
+        "/help" => BridgeCommand::Help,
         _ if is_reserved_name(command.split_whitespace().next().unwrap_or_default()) => {
-            parse_reserved(command).or(Some(BridgeCommand::Help))
+            parse_reserved(command).unwrap_or(BridgeCommand::Help)
         }
-        _ => Some(BridgeCommand::Prompt(suffix.to_string())),
+        _ => BridgeCommand::Prompt(message.to_string()),
     }
 }
 
 fn is_reserved_name(name: &str) -> bool {
     matches!(
         name,
-        "approve" | "approve-session" | "deny" | "answer" | "help" | "new" | "status" | "stop"
+        "/approve"
+            | "/approve-session"
+            | "/deny"
+            | "/answer"
+            | "/help"
+            | "/new"
+            | "/status"
+            | "/stop"
     )
 }
 
@@ -43,16 +49,16 @@ fn parse_reserved(command: &str) -> Option<BridgeCommand> {
     let name = words.next()?;
     let token = words.next()?.to_string();
     match name {
-        "approve" => Some(BridgeCommand::Approve {
+        "/approve" => Some(BridgeCommand::Approve {
             token,
             session: false,
         }),
-        "approve-session" => Some(BridgeCommand::Approve {
+        "/approve-session" => Some(BridgeCommand::Approve {
             token,
             session: true,
         }),
-        "deny" => Some(BridgeCommand::Deny { token }),
-        "answer" => Some(BridgeCommand::Answer {
+        "/deny" => Some(BridgeCommand::Deny { token }),
+        "/answer" => Some(BridgeCommand::Answer {
             token,
             answer: words.next()?.to_string(),
         }),

@@ -4,7 +4,6 @@ use crate::codex::CodexError;
 use crate::openwa::OpenWaError;
 use crate::openwa::OpenWaSession;
 use codex_app_server_protocol::ThreadResumeResponse;
-use std::path::Path;
 use std::sync::Mutex;
 use tempfile::tempdir;
 
@@ -14,7 +13,7 @@ struct FakeCodex {
 }
 
 impl CodexClient for FakeCodex {
-    async fn start_thread(&self, _workspace: &Path) -> Result<String, CodexError> {
+    async fn start_thread(&self) -> Result<String, CodexError> {
         Ok("thread-1".to_string())
     }
 
@@ -110,13 +109,11 @@ async fn durable_deduplication_starts_one_turn_for_a_replayed_webhook() {
         FakeOpenWa::default(),
         BridgeState::empty(),
         state_path.clone(),
-        directory.path().to_path_buf(),
         "personal".to_string(),
         "447700900000".to_string(),
         "http://bridge/webhooks/openwa".to_string(),
         "secret".to_string(),
         "447700900000@c.us".to_string(),
-        "!codex ".to_string(),
         3_500,
         1_500,
         20,
@@ -131,7 +128,7 @@ async fn durable_deduplication_starts_one_turn_for_a_replayed_webhook() {
         idempotency_key: "event-1".to_string(),
         message_id: "message-1".to_string(),
         chat_id: "447700900000@c.us".to_string(),
-        body: "!codex inspect the workspace".to_string(),
+        body: "inspect the current project".to_string(),
     };
 
     for _ in 0..2 {

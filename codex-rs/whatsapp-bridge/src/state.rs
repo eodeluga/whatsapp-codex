@@ -5,12 +5,11 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
-use std::path::PathBuf;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use thiserror::Error;
 
-pub const STATE_SCHEMA_VERSION: u32 = 1;
+pub const STATE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -36,7 +35,6 @@ pub struct ThreadBinding {
     pub openwa_session_id: String,
     pub self_chat_id: String,
     pub codex_thread_id: String,
-    pub workspace: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
