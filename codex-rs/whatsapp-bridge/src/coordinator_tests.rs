@@ -1,6 +1,7 @@
 use super::*;
 use crate::codex::CodexClient;
 use crate::codex::CodexError;
+use crate::codex::ThreadSummary;
 use crate::openwa::OpenWaError;
 use crate::openwa::OpenWaSession;
 use codex_app_server_protocol::ThreadResumeResponse;
@@ -19,6 +20,10 @@ impl CodexClient for FakeCodex {
 
     async fn resume_thread(&self, _thread_id: String) -> Result<ThreadResumeResponse, CodexError> {
         Err(CodexError::Transport)
+    }
+
+    async fn list_threads(&self) -> Result<Vec<ThreadSummary>, CodexError> {
+        Ok(Vec::new())
     }
 
     async fn start_turn(

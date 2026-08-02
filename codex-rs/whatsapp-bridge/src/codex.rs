@@ -8,6 +8,8 @@ use codex_app_server_protocol::ApprovalsReviewer;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadListParams;
+use codex_app_server_protocol::ThreadListResponse;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
@@ -28,6 +30,12 @@ pub enum CodexError {
     Transport,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadSummary {
+    pub id: String,
+    pub preview: String,
+}
+
 /// Codex operations used by the coordinator.
 ///
 /// Implementations preserve the app-server protocol's request and event
@@ -39,6 +47,10 @@ pub trait CodexClient: Send {
         &self,
         thread_id: String,
     ) -> impl std::future::Future<Output = Result<ThreadResumeResponse, CodexError>> + Send;
+
+    fn list_threads(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Vec<ThreadSummary>, CodexError>> + Send;
 
     fn start_turn(
         &self,
@@ -179,6 +191,39 @@ impl CodexClient for RemoteCodexClient {
             .await
             .map_err(|_| CodexError::Transport)?;
         Ok(response)
+    }
+
+    async fn list_threads(&self) -> Result<Vec<ThreadSummary>, CodexError> {
+        let response: ThreadListResponse = self
+            .client()?
+            .request_typed(ClientRequest::ThreadList {
+                request_id: self.request_id(),
+                params: ThreadListParams {
+                    cursor: None,
+                    limit: Some(20),
+                    sort_key: None,
+                    sort_direction: None,
+                    model_providers: None,
+                    source_kinds: None,
+                    archived: None,
+                    is_pinned: None,
+                    cwd: None,
+                    use_state_db_only: false,
+                    search_term: None,
+                    parent_thread_id: None,
+                    ancestor_thread_id: None,
+                },
+            })
+            .await
+            .map_err(|_| CodexError::Transport)?;
+        Ok(response
+            .data
+            .into_iter()
+            .map(|thread| ThreadSummary {
+                id: thread.id,
+                preview: thread.preview,
+            })
+            .collect())
     }
 
     async fn start_turn(

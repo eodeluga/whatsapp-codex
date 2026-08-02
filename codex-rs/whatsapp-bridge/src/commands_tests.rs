@@ -16,3 +16,15 @@ fn plain_messages_are_prompts_and_standard_controls_are_recognized() {
         }
     );
 }
+
+#[test]
+fn parses_whatsapp_thread_controls() {
+    assert_eq!(
+        parse_command("/whatsapp list-threads"),
+        BridgeCommand::WhatsAppListThreads
+    );
+    assert_eq!(
+        parse_command("/whatsapp attach thread-123"),
+        BridgeCommand::WhatsAppAttach("thread-123".to_string())
+    );
+}

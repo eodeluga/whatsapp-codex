@@ -6,6 +6,8 @@ pub enum BridgeCommand {
     New,
     Status,
     Stop,
+    WhatsAppAttach(String),
+    WhatsAppListThreads,
     Approve { token: String, session: bool },
     Deny { token: String },
     Answer { token: String, answer: String },
@@ -23,6 +25,13 @@ pub fn parse_command(message: &str) -> BridgeCommand {
         "/status" => BridgeCommand::Status,
         "/stop" => BridgeCommand::Stop,
         "/help" => BridgeCommand::Help,
+        "/whatsapp list-threads" => BridgeCommand::WhatsAppListThreads,
+        _ if command.starts_with("/whatsapp attach ") => command
+            .strip_prefix("/whatsapp attach ")
+            .filter(|token| !token.is_empty())
+            .map_or(BridgeCommand::Help, |token| {
+                BridgeCommand::WhatsAppAttach(token.to_string())
+            }),
         _ if is_reserved_name(command.split_whitespace().next().unwrap_or_default()) => {
             parse_reserved(command).unwrap_or(BridgeCommand::Help)
         }
@@ -41,6 +50,7 @@ fn is_reserved_name(name: &str) -> bool {
             | "/new"
             | "/status"
             | "/stop"
+            | "/whatsapp"
     )
 }
 

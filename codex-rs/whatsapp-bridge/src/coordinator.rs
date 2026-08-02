@@ -553,6 +553,8 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
             },
             BridgeCommand::Status => self.send(&self.status_message()).await,
             BridgeCommand::Stop => self.stop_active_turn().await,
+            BridgeCommand::WhatsAppListThreads => self.list_threads().await,
+            BridgeCommand::WhatsAppAttach(token) => self.attach_thread(token).await,
             BridgeCommand::Help => self.send_help().await,
             BridgeCommand::Approve { token, session } => {
                 self.approve_request(&token, session).await
@@ -563,6 +565,49 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
                     .await;
             }
             BridgeCommand::Answer { token, answer } => self.answer_request(&token, answer).await,
+        }
+    }
+
+    async fn list_threads(&mut self) {
+        match self.codex.list_threads().await {
+            Ok(threads) if threads.is_empty() => {
+                self.send("[codex] No resumable Codex threads are available.")
+                    .await;
+            }
+            Ok(threads) => {
+                let rendered = threads
+                    .into_iter()
+                    .map(|thread| format!("• `{}` — {}", thread.id, thread.preview))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.send(&format!(
+                    "[codex] Recent threads:\n{rendered}\nAttach one with `/whatsapp attach <thread-id>`.",
+                ))
+                .await;
+            }
+            Err(_) => self.send("[codex] Could not list Codex threads.").await,
+        }
+    }
+
+    async fn attach_thread(&mut self, thread_id: String) {
+        if self.state.active_turn.is_some() {
+            self.send("[codex] Stop or wait for the active turn before attaching another thread.")
+                .await;
+            return;
+        }
+        match self.codex.resume_thread(thread_id.clone()).await {
+            Ok(_) if self.bind_thread(thread_id) => {
+                self.send("[codex] Attached the selected Codex thread.")
+                    .await;
+            }
+            Ok(_) => {
+                self.send("[codex] The selected thread could not be persisted.")
+                    .await
+            }
+            Err(_) => {
+                self.send("[codex] Could not resume that Codex thread.")
+                    .await
+            }
         }
     }
 
