@@ -33,15 +33,13 @@ fn renders_validation_error() {
 }
 
 #[test]
-fn renders_redacted_review() {
+fn renders_gateway_managed_review() {
     let directory = tempdir().unwrap();
     let mut widget = WhatsAppWidget::new_for_test(directory.path().to_path_buf());
     widget.phone_number = "+447700900000".to_string();
-    widget.session_id = "personal".to_string();
-    widget.api_key = "operator-secret".to_string();
     widget.stage = SetupStage::Review;
     let rendered = render(&widget);
-    assert!(!rendered.contains("operator-secret"));
+    assert!(rendered.contains("managed internally"));
     insta::assert_snapshot!(rendered);
 }
 

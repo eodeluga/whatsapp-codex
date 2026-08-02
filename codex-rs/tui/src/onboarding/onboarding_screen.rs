@@ -13,8 +13,6 @@
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_protocol::ServerNotification;
-use codex_exec_server::LOCAL_FS;
-use codex_git_utils::resolve_root_git_project_for_trust;
 #[cfg(target_os = "windows")]
 use codex_protocol::config_types::WindowsSandboxLevel;
 use crossterm::event::KeyCode;
@@ -162,13 +160,9 @@ impl OnboardingScreen {
         let show_windows_create_sandbox_hint = false;
         let highlighted = TrustDirectorySelection::Trust;
         if show_trust_screen {
-            let trust_target = resolve_root_git_project_for_trust(LOCAL_FS.as_ref(), &config.cwd)
-                .await
-                .map(Into::into)
-                .unwrap_or_else(|| cwd.clone());
             steps.push(Step::TrustDirectory(TrustDirectoryWidget {
                 cwd: cwd.clone(),
-                trust_target,
+                trust_target: cwd.clone(),
                 show_windows_create_sandbox_hint,
                 should_quit: false,
                 selection: None,
@@ -178,7 +172,6 @@ impl OnboardingScreen {
         }
         if show_whatsapp_screen {
             steps.push(Step::WhatsApp(WhatsAppWidget::new(
-                cwd,
                 config.codex_home.to_path_buf(),
                 whatsapp_config,
             )));
@@ -632,18 +625,19 @@ async fn persist_whatsapp_config(
     onboarding_screen: &mut OnboardingScreen,
     request_handle: Option<AppServerRequestHandle>,
 ) -> bool {
-    let Some((step_index, config)) =
-        onboarding_screen
-            .steps
-            .iter_mut()
-            .enumerate()
-            .find_map(|(index, step)| {
-                if let Step::WhatsApp(widget) = step {
-                    widget.take_save_request().map(|config| (index, config))
-                } else {
-                    None
-                }
-            })
+    let Some((step_index, config, runtime_config)) = onboarding_screen
+        .steps
+        .iter_mut()
+        .enumerate()
+        .find_map(|(index, step)| {
+            if let Step::WhatsApp(widget) = step {
+                widget
+                    .take_save_request()
+                    .map(|config| (index, config, widget.take_runtime_config()))
+            } else {
+                None
+            }
+        })
     else {
         return false;
     };
@@ -666,10 +660,27 @@ async fn persist_whatsapp_config(
         return false;
     };
     let saved = match result {
-        Ok(_) => {
-            widget.mark_saved();
-            true
-        }
+        Ok(_) => match runtime_config {
+            Some(runtime_config) => match codex_config::save_whatsapp_runtime_config(
+                widget.codex_home(),
+                &runtime_config,
+            ) {
+                Ok(()) => {
+                    widget.mark_saved();
+                    true
+                }
+                Err(error) => {
+                    widget.mark_save_failed(format!(
+                        "Could not initialise WhatsApp gateway state: {error}"
+                    ));
+                    false
+                }
+            },
+            None => {
+                widget.mark_saved();
+                true
+            }
+        },
         Err(error) => {
             widget.mark_save_failed(format_config_error(&error));
             false

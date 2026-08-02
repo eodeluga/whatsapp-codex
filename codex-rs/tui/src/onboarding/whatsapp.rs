@@ -1,8 +1,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use codex_config::OpenWaConfigToml;
-use codex_config::WhatsAppBridgeConfigToml;
 use codex_config::WhatsAppConfigToml;
+use codex_config::WhatsAppRuntimeConfig;
 use codex_config::canonical_e164;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -66,7 +65,7 @@ struct GatewayCheck {
 }
 
 impl GatewayPreflight {
-    fn check(codex_home: &std::path::Path, workspace: &std::path::Path) -> Self {
+    fn check(codex_home: &std::path::Path) -> Self {
         let docker_cli = command_succeeds("docker", &["--version"]);
         let docker_daemon = docker_cli && command_succeeds("docker", &["info"]);
         let compose = docker_cli && command_succeeds("docker", &["compose", "version"]);
@@ -119,15 +118,6 @@ impl GatewayPreflight {
                     },
                     passed: codex_home_writable,
                 },
-                GatewayCheck {
-                    label: "Workspace",
-                    detail: if workspace.is_dir() {
-                        "valid".to_string()
-                    } else {
-                        "must be an existing directory".to_string()
-                    },
-                    passed: workspace.is_dir(),
-                },
             ],
         }
     }
@@ -165,48 +155,33 @@ pub(crate) struct WhatsAppWidget {
     stage: SetupStage,
     highlighted: SetupChoice,
     phone_number: String,
-    workspace: String,
-    session_id: String,
-    api_key: String,
-    webhook_secret: String,
     codex_home: PathBuf,
     preflight: Option<GatewayPreflight>,
     save_request: Option<WhatsAppConfigToml>,
+    runtime_config: Option<WhatsAppRuntimeConfig>,
     skipped: bool,
     error: Option<String>,
 }
 
 impl WhatsAppWidget {
-    pub(crate) fn new(
-        current_workspace: PathBuf,
-        codex_home: PathBuf,
-        existing: Option<WhatsAppConfigToml>,
-    ) -> Self {
+    pub(crate) fn new(codex_home: PathBuf, existing: Option<WhatsAppConfigToml>) -> Self {
         let existing = existing.unwrap_or_default();
-        let openwa = existing.openwa.unwrap_or_default();
         Self {
             stage: SetupStage::Choice,
             highlighted: SetupChoice::Configure,
             phone_number: existing.account_phone_number.unwrap_or_default(),
-            workspace: existing
-                .workspace
-                .unwrap_or(current_workspace)
-                .display()
-                .to_string(),
-            session_id: openwa.session_id.unwrap_or_default(),
-            api_key: openwa.api_key.unwrap_or_default(),
-            webhook_secret: generate_webhook_secret(),
             codex_home,
             preflight: None,
             save_request: None,
+            runtime_config: None,
             skipped: false,
             error: None,
         }
     }
 
     #[cfg(test)]
-    fn new_for_test(current_workspace: PathBuf) -> Self {
-        let mut widget = Self::new(current_workspace.clone(), current_workspace, None);
+    fn new_for_test(codex_home: PathBuf) -> Self {
+        let mut widget = Self::new(codex_home, None);
         widget.preflight = Some(GatewayPreflight {
             checks: vec![GatewayCheck {
                 label: "Test",
@@ -218,14 +193,19 @@ impl WhatsAppWidget {
     }
 
     fn run_preflight(&mut self) {
-        self.preflight = Some(GatewayPreflight::check(
-            &self.codex_home,
-            PathBuf::from(&self.workspace).as_path(),
-        ));
+        self.preflight = Some(GatewayPreflight::check(&self.codex_home));
     }
 
     pub(crate) fn take_save_request(&mut self) -> Option<WhatsAppConfigToml> {
         self.save_request.take()
+    }
+
+    pub(crate) fn take_runtime_config(&mut self) -> Option<WhatsAppRuntimeConfig> {
+        self.runtime_config.take()
+    }
+
+    pub(crate) fn codex_home(&self) -> &std::path::Path {
+        &self.codex_home
     }
 
     pub(crate) fn mark_saved(&mut self) {
@@ -249,6 +229,7 @@ impl WhatsAppWidget {
     fn begin_save(&mut self, config: WhatsAppConfigToml, skipped: bool) {
         self.skipped = skipped;
         self.save_request = Some(config);
+        self.runtime_config = (!skipped).then(|| self.new_runtime_config());
         self.error = None;
         self.stage = SetupStage::Saving;
     }
@@ -258,15 +239,23 @@ impl WhatsAppWidget {
             onboarding_complete: true,
             enabled: true,
             account_phone_number: Some(self.phone_number.clone()),
-            workspace: Some(PathBuf::from(&self.workspace)),
-            trigger_prefix: None,
-            openwa: Some(OpenWaConfigToml {
-                session_id: Some(self.session_id.clone()),
-                api_key: Some(self.api_key.clone()),
-                webhook_signing_secret: Some(self.webhook_secret.clone()),
-                ..Default::default()
-            }),
-            bridge: Some(WhatsAppBridgeConfigToml::default()),
+        }
+    }
+
+    fn new_runtime_config(&self) -> WhatsAppRuntimeConfig {
+        WhatsAppRuntimeConfig {
+            openwa_api_base_url: "http://openwa:2785/api".to_string(),
+            openwa_session_id: format!("codex-{}", random_secret()),
+            openwa_api_key: random_secret(),
+            webhook_signing_secret: random_secret(),
+            webhook_url: "http://codex-whatsapp-bridge:8787/webhooks/openwa".to_string(),
+            bridge_listen: "0.0.0.0:8787".to_string(),
+            state_path: PathBuf::from("/codex-home/whatsapp/state.json"),
+            max_queued_prompts: 20,
+            output_chunk_chars: 3_500,
+            edit_interval_ms: 1_500,
+            dedupe_capacity: 10_000,
+            dedupe_ttl_hours: 168,
         }
     }
 
@@ -281,9 +270,6 @@ impl WhatsAppWidget {
     fn current_field_mut(&mut self) -> Option<&mut String> {
         match self.stage {
             SetupStage::Field(0) => Some(&mut self.phone_number),
-            SetupStage::Field(1) => Some(&mut self.workspace),
-            SetupStage::Field(2) => Some(&mut self.session_id),
-            SetupStage::Field(3) => Some(&mut self.api_key),
             _ => None,
         }
     }
@@ -293,13 +279,6 @@ impl WhatsAppWidget {
             0 if canonical_e164(&self.phone_number).is_none() => {
                 Err("Enter a canonical E.164 number such as +447700900000.")
             }
-            1 if !PathBuf::from(&self.workspace).is_absolute()
-                || !PathBuf::from(&self.workspace).is_dir() =>
-            {
-                Err("Workspace must be an absolute existing directory.")
-            }
-            2 if self.session_id.trim().is_empty() => Err("Session ID cannot be empty."),
-            3 if self.api_key.trim().is_empty() => Err("API key cannot be empty."),
             _ => Ok(()),
         }
     }
@@ -307,12 +286,15 @@ impl WhatsAppWidget {
     fn field_label(index: usize) -> &'static str {
         match index {
             0 => "WhatsApp account number (E.164)",
-            1 => "Host workspace",
-            2 => "OpenWA session ID",
-            3 => "OpenWA API key",
             _ => "",
         }
     }
+}
+
+fn random_secret() -> String {
+    let mut bytes = [0_u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 impl KeyboardHandler for WhatsAppWidget {
@@ -365,13 +347,9 @@ impl KeyboardHandler for WhatsAppWidget {
                     self.stage = SetupStage::Choice;
                 } else if keys::CONFIRM.is_pressed(key_event) {
                     match self.validate_field(index) {
-                        Ok(()) if index == 3 => {
-                            self.error = None;
-                            self.stage = SetupStage::Review;
-                        }
                         Ok(()) => {
                             self.error = None;
-                            self.stage = SetupStage::Field(index + 1);
+                            self.stage = SetupStage::Review;
                         }
                         Err(error) => self.error = Some(error.to_string()),
                     }
@@ -391,7 +369,7 @@ impl KeyboardHandler for WhatsAppWidget {
             }
             SetupStage::Review => {
                 if keys::CANCEL.is_pressed(key_event) {
-                    self.stage = SetupStage::Field(3);
+                    self.stage = SetupStage::Field(0);
                 } else if keys::CONFIRM.is_pressed(key_event) {
                     self.begin_save(self.configured_value(), /*skipped*/ false);
                 }
@@ -430,7 +408,7 @@ impl WidgetRef for &WhatsAppWidget {
             SetupStage::Choice => {
                 column.push(
                     Paragraph::new(
-                        "Connect one private WhatsApp self-chat to this workspace through your self-hosted OpenWA service.",
+                        "Connect one private WhatsApp self-chat as another way to use Codex. Your messages use the same current Codex thread and controls as the terminal.",
                     )
                     .wrap(Wrap { trim: true })
                     .inset(Insets::tlbr(
@@ -475,17 +453,10 @@ impl WidgetRef for &WhatsAppWidget {
                 }
             }
             SetupStage::Field(index) => {
-                let value = match index {
-                    0 => self.phone_number.as_str(),
-                    1 => self.workspace.as_str(),
-                    2 => self.session_id.as_str(),
-                    3 => self.api_key.as_str(),
-                    _ => "",
-                };
-                let shown = if index == 3 {
-                    "•".repeat(value.chars().count())
+                let value = if index == 0 {
+                    self.phone_number.as_str()
                 } else {
-                    value.to_string()
+                    ""
                 };
                 column.push(
                     Paragraph::new(WhatsAppWidget::field_label(index))
@@ -495,7 +466,7 @@ impl WidgetRef for &WhatsAppWidget {
                         )),
                 );
                 column.push(
-                    Paragraph::new(shown)
+                    Paragraph::new(value)
                         .block(
                             Block::default()
                                 .borders(Borders::ALL)
@@ -509,32 +480,10 @@ impl WidgetRef for &WhatsAppWidget {
             SetupStage::Review => {
                 column.push("  Review");
                 column.push(format!("  Account: {}", self.phone_number));
-                column.push(format!("  Workspace: {}", self.workspace));
-                column.push(format!("  OpenWA session: {}", self.session_id));
-                column.push("  OpenWA API key: [redacted]");
-                column.push("  Webhook signing secret: [generated and redacted]");
-                column.push("  Trigger prefix: !codex ");
-                column.push(format!(
-                    "  OpenWA API: {}",
-                    codex_config::whatsapp::DEFAULT_OPENWA_API_BASE_URL
-                ));
-                column.push(format!(
-                    "  Webhook URL: {}",
-                    codex_config::whatsapp::DEFAULT_OPENWA_WEBHOOK_URL
-                ));
-                column.push(format!(
-                    "  App-server: {}",
-                    codex_config::whatsapp::DEFAULT_APP_SERVER_ENDPOINT
-                ));
-                column.push(format!(
-                    "  State: {}",
-                    codex_config::whatsapp::DEFAULT_STATE_PATH
-                ));
-                column.push(format!(
-                    "  Queue/output: {} prompts, {} chars per part",
-                    codex_config::whatsapp::DEFAULT_MAX_QUEUED_PROMPTS,
-                    codex_config::whatsapp::DEFAULT_OUTPUT_CHUNK_CHARS,
-                ));
+                column.push(
+                    "  Codex will start the optional local gateway and show a QR pairing step.",
+                );
+                column.push("  Gateway credentials and connection details are managed internally.");
             }
             SetupStage::Saving => column.push("  Saving WhatsApp configuration…".dim()),
             SetupStage::Saved if self.skipped => {
@@ -564,12 +513,6 @@ impl WidgetRef for &WhatsAppWidget {
         }
         column.render(area, buf);
     }
-}
-
-fn generate_webhook_secret() -> String {
-    let mut bytes = [0_u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 #[cfg(test)]
