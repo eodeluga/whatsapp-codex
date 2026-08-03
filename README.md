@@ -61,9 +61,10 @@ docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml up -d --build
 
 OpenWA and the bridge create the private OpenWA session and operator key
 internally. To retrieve the pairing payload over loopback, open
-`http://127.0.0.1:8787/pairing` after Compose reports the bridge healthy, then
-scan the QR code supplied by OpenWA. No environment variables or manual TOML
-settings are required.
+`http://127.0.0.1:8787/pairing` after the bridge starts, then scan the displayed
+QR code. The bridge becomes healthy after WhatsApp is paired and Codex's local
+app-server is available. No environment variables or manual TOML settings are
+required.
 
 For source validation, run the targeted repository workflows from `codex-rs`:
 
