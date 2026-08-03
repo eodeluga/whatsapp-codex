@@ -141,7 +141,20 @@ pub fn save_whatsapp_runtime_config(
     let parent = path.parent().ok_or(WhatsAppConfigError::Write)?;
     fs::create_dir_all(parent).map_err(|_| WhatsAppConfigError::Write)?;
     let contents = serde_json::to_vec_pretty(runtime).map_err(|_| WhatsAppConfigError::Parse)?;
-    fs::write(path, contents).map_err(|_| WhatsAppConfigError::Write)
+    fs::write(&path, contents).map_err(|_| WhatsAppConfigError::Write)?;
+    set_private_permissions(&path).map_err(|_| WhatsAppConfigError::Write)
+}
+
+#[cfg(unix)]
+fn set_private_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_private_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// The user-facing table contains no credentials. Runtime credentials are not
