@@ -30,6 +30,17 @@ fn enabled_configuration_requires_an_owner_number() {
 }
 
 #[test]
+fn redacted_user_configuration_preserves_the_owner_setting() {
+    let config = WhatsAppConfigToml {
+        onboarding_complete: true,
+        enabled: true,
+        account_phone_number: Some("+447700900000".to_string()),
+    };
+
+    assert_eq!(config.redacted(), config);
+}
+
+#[test]
 fn rejects_unknown_user_configuration_fields() {
     assert!(toml::from_str::<WhatsAppConfigToml>("enabled = false\nworkspace = '/tmp'").is_err());
 }

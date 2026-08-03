@@ -87,6 +87,13 @@ impl WhatsAppConfigToml {
             canonical_e164(phone_number).ok_or(WhatsAppConfigError::InvalidPhoneNumber)?;
         Ok(format!("{}@c.us", &canonical[1..]))
     }
+
+    /// Returns the user-owned configuration safe for config RPC responses.
+    /// Gateway credentials live only in private runtime state, so this value
+    /// contains no secret material to replace.
+    pub fn redacted(&self) -> Self {
+        self.clone()
+    }
 }
 
 /// Parses a canonical E.164 phone number and returns its normalized form.
