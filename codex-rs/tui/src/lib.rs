@@ -2084,16 +2084,34 @@ async fn start_whatsapp_app_server_daemon(
         .codex_self_exe
         .as_ref()
         .ok_or_else(|| color_eyre::eyre::eyre!("could not locate the Codex executable"))?;
-    let status = tokio::process::Command::new(codex_executable)
-        .args(["app-server", "daemon", "start"])
-        .status()
-        .await
-        .wrap_err("failed to start the local Codex app-server daemon")?;
-    if !status.success() {
-        color_eyre::eyre::bail!("the local Codex app-server daemon did not start successfully");
-    }
     let socket_path =
         codex_app_server_client::app_server_control_socket_path(config.codex_home.as_path())?;
+    if socket_path.as_path().exists() {
+        return Ok(AppServerTarget::LocalDaemon {
+            endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
+        });
+    }
+    let mut child = tokio::process::Command::new(codex_executable)
+        .args(["app-server", "--listen", "unix://"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .wrap_err("failed to start the local Codex app-server")?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !socket_path.as_path().exists() && tokio::time::Instant::now() < deadline {
+        if child
+            .try_wait()
+            .wrap_err("failed while starting the local Codex app-server")?
+            .is_some()
+        {
+            color_eyre::eyre::bail!("the local Codex app-server exited during startup");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    if !socket_path.as_path().exists() {
+        color_eyre::eyre::bail!("the local Codex app-server did not create its control socket");
+    }
     Ok(AppServerTarget::LocalDaemon {
         endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
     })
