@@ -1326,7 +1326,7 @@ async fn run_ratatui_app(
     arg0_paths: Arg0DispatchPaths,
     loader_overrides: LoaderOverrides,
     strict_config: bool,
-    app_server_target: AppServerTarget,
+    mut app_server_target: AppServerTarget,
     remote_cwd_override: Option<PathBuf>,
     initial_config: Config,
     manually_selected_oss_provider: Option<String>,
@@ -1513,6 +1513,29 @@ async fn run_ratatui_app(
     } else {
         initial_config
     };
+
+    if whatsapp_is_enabled(&config) && matches!(app_server_target, AppServerTarget::Embedded) {
+        shutdown_app_server_if_present(app_server.take()).await;
+        app_server_target = start_whatsapp_app_server_daemon(&arg0_paths, &config).await?;
+        let app_server_client = start_app_server(
+            &app_server_target,
+            arg0_paths.clone(),
+            config.clone(),
+            cli_kv_overrides.clone(),
+            loader_overrides.clone(),
+            strict_config,
+            cloud_config_bundle.clone(),
+            feedback.clone(),
+            log_db.clone(),
+            state_db.clone(),
+            environment_manager.clone(),
+        )
+        .await?;
+        app_server = Some(
+            AppServerSession::new(app_server_client, app_server_target.thread_params_mode())
+                .with_remote_cwd_override(remote_cwd_override.clone()),
+        );
+    }
 
     let mut missing_session_exit = |id_str: &str, action: &str| {
         error!("Error finding conversation path: {id_str}");
@@ -2040,6 +2063,50 @@ fn should_show_whatsapp_screen(config: &Config) -> bool {
     !whatsapp
         .as_ref()
         .is_some_and(codex_config::WhatsAppConfigToml::is_complete)
+}
+
+fn whatsapp_is_enabled(config: &Config) -> bool {
+    config
+        .config_layer_stack
+        .get_active_user_layer()
+        .and_then(|layer| layer.config.get("whatsapp"))
+        .cloned()
+        .and_then(|value| value.try_into::<codex_config::WhatsAppConfigToml>().ok())
+        .is_some_and(|whatsapp| whatsapp.enabled)
+}
+
+#[cfg(unix)]
+async fn start_whatsapp_app_server_daemon(
+    arg0_paths: &Arg0DispatchPaths,
+    config: &Config,
+) -> color_eyre::Result<AppServerTarget> {
+    let codex_executable = arg0_paths
+        .codex_self_exe
+        .as_ref()
+        .ok_or_else(|| color_eyre::eyre::eyre!("could not locate the Codex executable"))?;
+    let status = tokio::process::Command::new(codex_executable)
+        .args(["app-server", "daemon", "start"])
+        .status()
+        .await
+        .wrap_err("failed to start the local Codex app-server daemon")?;
+    if !status.success() {
+        color_eyre::eyre::bail!("the local Codex app-server daemon did not start successfully");
+    }
+    let socket_path =
+        codex_app_server_client::app_server_control_socket_path(config.codex_home.as_path())?;
+    Ok(AppServerTarget::LocalDaemon {
+        endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
+    })
+}
+
+#[cfg(not(unix))]
+async fn start_whatsapp_app_server_daemon(
+    _arg0_paths: &Arg0DispatchPaths,
+    _config: &Config,
+) -> color_eyre::Result<AppServerTarget> {
+    color_eyre::eyre::bail!(
+        "WhatsApp gateway setup currently requires a Unix local app-server daemon"
+    )
 }
 
 fn should_show_login_screen(login_status: LoginStatus, config: &Config) -> bool {

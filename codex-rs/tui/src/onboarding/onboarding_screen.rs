@@ -310,10 +310,10 @@ impl KeyboardHandler for OnboardingScreen {
         if should_quit {
             if self.is_auth_in_progress() {
                 self.cancel_auth_if_active();
-                // If the user cancels the auth menu, exit the app rather than
-                // leave the user at a prompt in an unauthed state.
-                self.should_exit = true;
             }
+            // Onboarding has no active Codex turn to interrupt, so Ctrl-C and
+            // the other explicit quit bindings always leave the application.
+            self.should_exit = true;
             self.is_done = true;
         } else {
             if let Some(Step::Welcome(widget)) = self
@@ -740,6 +740,7 @@ async fn persist_selected_trust(
 #[cfg(test)]
 mod tests {
     use super::ApiKeyEntryContext;
+    use super::KeyboardHandler;
     use super::OnboardingScreen;
     use super::Step;
     use super::StepStateProvider;
@@ -800,6 +801,23 @@ mod tests {
             },
         );
         assert!(!suppressed);
+    }
+
+    #[test]
+    fn control_c_exits_onboarding() {
+        let mut onboarding_screen = OnboardingScreen {
+            request_frame: FrameRequester::test_dummy(),
+            steps: Vec::new(),
+            config_path: PathBuf::from("/codex-home/config.toml"),
+            is_done: false,
+            should_exit: false,
+        };
+
+        onboarding_screen
+            .handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert!(onboarding_screen.is_done());
+        assert!(onboarding_screen.should_exit());
     }
 
     #[tokio::test]
