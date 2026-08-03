@@ -9,11 +9,13 @@ The bridge reads the small user-owned `[whatsapp]` table from Codex's normal
 `config.toml` and private runtime state from `CODEX_HOME/whatsapp/runtime.json`.
 Users must not create either OpenWA credentials or webhook settings manually.
 
-Gateway packaging and lifecycle management are not complete on this branch.
-The Compose file remains a development-only deployment asset and is not an
-installation path for an end user. Do not follow older instructions that ask
-for a workspace, `!codex` prefix, OpenWA session ID, API key, or webhook
-secret; those settings are no longer part of the product configuration.
+The supplied Compose file is the source-build gateway deployment. It starts
+OpenWA and the bridge, which creates the private OpenWA session and stores the
+issued operator key in Codex runtime state. The bridge's pairing payload is
+available only on `http://127.0.0.1:8787/pairing`. Do not follow older
+instructions that ask for a workspace, `!codex` prefix, OpenWA session ID, API
+key, or webhook secret; those settings are no longer part of the product
+configuration.
 
 For development validation, run the targeted repository workflow from
 `codex-rs`:

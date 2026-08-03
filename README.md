@@ -5,9 +5,8 @@ normal local Codex session. It uses Codex's existing app-server daemon and
 normal thread history; it does not create a separate agent, workspace, or
 conversation model.
 
-This branch is under active development. The revised configuration and bridge
-transport are present, but automatic gateway packaging, launch, and QR pairing
-are not complete. Do not use this checkout for a live WhatsApp workflow yet.
+This branch provides a source-build deployment. The gateway is started with
+the supplied Docker Compose file after normal Codex onboarding.
 
 ## Intended first-run experience
 
@@ -18,7 +17,8 @@ Run `codex` normally. Its first-run TUI will:
 3. when selected, ask only for the private account's E.164 phone number and
    check Docker and Docker Compose;
 4. create private gateway state below the normal Codex home directory; and
-5. start and pair the optional gateway before opening the ordinary Codex chat.
+5. switch the TUI to Codex's local app-server daemon before opening the
+   ordinary chat.
 
 The normal terminal and WhatsApp then share Codex threads and history. Plain
 messages are prompts; standard slash controls use Codex semantics. WhatsApp
@@ -44,11 +44,28 @@ details are private Codex runtime state under `~/.codex/whatsapp/`.
 Docker is optional: choosing not to enable WhatsApp leaves normal terminal
 Codex available without it.
 
-## Development status
+## Source-build quickstart
 
-The source checkout currently requires the remaining gateway lifecycle work
-before it can be built and used end-to-end. Once that work is complete, format
-and validate from `codex-rs` with the repository workflows:
+Build both binaries from `codex-rs`:
+
+```shell
+cargo build --release -p codex-cli -p codex-whatsapp-bridge
+```
+
+Run `./target/release/codex` and select WhatsApp during the first-run flow.
+Then start the local gateway from the repository root:
+
+```shell
+docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml up -d --build
+```
+
+OpenWA and the bridge create the private OpenWA session and operator key
+internally. To retrieve the pairing payload over loopback, open
+`http://127.0.0.1:8787/pairing` after Compose reports the bridge healthy, then
+scan the QR code supplied by OpenWA. No environment variables or manual TOML
+settings are required.
+
+For source validation, run the targeted repository workflows from `codex-rs`:
 
 ```shell
 just fmt

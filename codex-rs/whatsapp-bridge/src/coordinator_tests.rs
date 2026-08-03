@@ -99,6 +99,10 @@ impl OpenWaClient for FakeOpenWa {
     async fn register_webhook(&self, _url: String, _secret: String) -> Result<(), OpenWaError> {
         Ok(())
     }
+
+    async fn pairing_qr(&self) -> Result<serde_json::Value, OpenWaError> {
+        Ok(serde_json::Value::Null)
+    }
 }
 
 #[tokio::test]

@@ -10,12 +10,14 @@ use axum::routing::get;
 use axum::routing::post;
 use codex_config::load_user_whatsapp_config;
 use codex_config::load_whatsapp_runtime_config;
+use codex_config::save_whatsapp_runtime_config;
 use codex_whatsapp_bridge::codex::CodexClient;
 use codex_whatsapp_bridge::codex::RemoteCodexClient;
 use codex_whatsapp_bridge::coordinator::Coordinator;
 use codex_whatsapp_bridge::coordinator::CoordinatorCommand;
 use codex_whatsapp_bridge::openwa::HttpOpenWaClient;
 use codex_whatsapp_bridge::openwa::OpenWaClient;
+use codex_whatsapp_bridge::openwa::provision_session;
 use codex_whatsapp_bridge::state::BridgeState;
 use codex_whatsapp_bridge::webhook::filter_inbound;
 use codex_whatsapp_bridge::webhook::parse_verified_webhook;
@@ -33,6 +35,7 @@ struct WebhookState {
     self_chat_id: String,
     commands: mpsc::Sender<CoordinatorCommand>,
     ready: Arc<AtomicBool>,
+    openwa: HttpOpenWaClient,
 }
 
 #[tokio::main]
@@ -62,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
     let codex_home = config_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("WhatsApp config path has no parent directory"))?;
-    let runtime = load_whatsapp_runtime_config(codex_home)?;
+    let mut runtime = load_whatsapp_runtime_config(codex_home)?;
     let self_chat_id = config.self_chat_jid()?;
     let socket_path = codex_app_server_client::app_server_control_socket_path(codex_home)?;
     let codex = match RemoteCodexClient::connect_unix(socket_path.clone()).await {
@@ -101,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
-    let openwa_client = HttpOpenWaClient::new(
+    let mut openwa_client = HttpOpenWaClient::new(
         runtime.openwa_api_base_url.clone(),
         runtime.openwa_session_id.clone(),
         runtime.openwa_api_key.clone(),
@@ -113,6 +116,25 @@ async fn main() -> anyhow::Result<()> {
         .trim_start_matches('+')
         .to_string();
     let webhook_secret = runtime.webhook_signing_secret.clone();
+    if matches!(
+        openwa_client.session_status().await,
+        Err(codex_whatsapp_bridge::openwa::OpenWaError::Unauthorized)
+    ) {
+        let administrator_key = std::fs::read_to_string("/openwa-data/.api-key")
+            .map_err(|_| anyhow::anyhow!("OpenWA administrator key is not ready"))?;
+        runtime.openwa_api_key = provision_session(
+            &runtime.openwa_api_base_url,
+            &runtime.openwa_session_id,
+            administrator_key.trim(),
+        )
+        .await?;
+        save_whatsapp_runtime_config(codex_home, &runtime)?;
+        openwa_client = HttpOpenWaClient::new(
+            runtime.openwa_api_base_url.clone(),
+            runtime.openwa_session_id.clone(),
+            runtime.openwa_api_key.clone(),
+        )?;
+    }
     let openwa_healthy = match openwa_client.session_status().await {
         Ok(session) => {
             if !session.status.eq_ignore_ascii_case("ready")
@@ -164,6 +186,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health/live", get(|| async { StatusCode::OK }))
         .route("/health/ready", get(health_ready))
+        .route("/pairing", get(pairing_qr))
         .route("/webhooks/openwa", post(openwa_webhook))
         .layer(DefaultBodyLimit::max(64 * 1024))
         .with_state(WebhookState {
@@ -172,6 +195,7 @@ async fn main() -> anyhow::Result<()> {
             self_chat_id,
             commands: commands.clone(),
             ready,
+            openwa: openwa_client,
         });
     let listener = tokio::net::TcpListener::bind(&runtime.bridge_listen).await?;
     tracing::info!(listen = runtime.bridge_listen, "WhatsApp bridge is ready");
@@ -218,6 +242,17 @@ async fn health_ready(State(state): State<WebhookState>) -> StatusCode {
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     }
+}
+
+async fn pairing_qr(
+    State(state): State<WebhookState>,
+) -> Result<axum::Json<serde_json::Value>, StatusCode> {
+    state
+        .openwa
+        .pairing_qr()
+        .await
+        .map(axum::Json)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
 }
 
 async fn openwa_webhook(

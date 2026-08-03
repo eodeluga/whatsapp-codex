@@ -35,7 +35,10 @@ services:
       - ${CODEX_HOME:-${HOME}/.codex}/config.toml:/codex-home/config.toml:ro
       - ${CODEX_HOME:-${HOME}/.codex}/whatsapp:/codex-home/whatsapp
       - ${CODEX_HOME:-${HOME}/.codex}/app-server-control:/codex-home/app-server-control
+      - openwa-data:/openwa-data:ro
     networks: [bridge]
+    ports:
+      - "127.0.0.1:8787:8787"
     depends_on:
       openwa:
         condition: service_healthy

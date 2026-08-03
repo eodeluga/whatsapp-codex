@@ -3,6 +3,7 @@
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::json;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -46,6 +47,10 @@ pub trait OpenWaClient: Send + Sync {
         url: String,
         secret: String,
     ) -> impl std::future::Future<Output = Result<(), OpenWaError>> + Send;
+
+    fn pairing_qr(
+        &self,
+    ) -> impl std::future::Future<Output = Result<serde_json::Value, OpenWaError>> + Send;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -90,6 +95,57 @@ impl HttpOpenWaClient {
             api_key,
         })
     }
+}
+
+/// Creates and starts the private OpenWA session, returning its one-time
+/// session-scoped operator key. OpenWA owns the administrator credential; the
+/// bridge reads it only from the Docker-managed data volume.
+pub async fn provision_session(
+    api_base_url: &str,
+    session_id: &str,
+    administrator_key: &str,
+) -> Result<String, OpenWaError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|_| OpenWaError::Transport)?;
+    let api_base_url = api_base_url.trim_end_matches('/');
+    let create = client
+        .post(format!("{api_base_url}/sessions"))
+        .header("X-API-Key", administrator_key)
+        .json(&json!({ "name": session_id }))
+        .send()
+        .await
+        .map_err(|_| OpenWaError::Transport)?;
+    if !create.status().is_success() && create.status() != StatusCode::CONFLICT {
+        ensure_success(create.status())?;
+    }
+    let start = client
+        .post(format!("{api_base_url}/sessions/{session_id}/start"))
+        .header("X-API-Key", administrator_key)
+        .send()
+        .await
+        .map_err(|_| OpenWaError::Transport)?;
+    if !start.status().is_success() && start.status() != StatusCode::CONFLICT {
+        ensure_success(start.status())?;
+    }
+    let response = client
+        .post(format!("{api_base_url}/auth/api-keys"))
+        .header("X-API-Key", administrator_key)
+        .json(&json!({
+            "name": "WhatsApp Codex bridge",
+            "role": "operator",
+            "allowedSessions": [session_id],
+        }))
+        .send()
+        .await
+        .map_err(|_| OpenWaError::Transport)?;
+    ensure_success(response.status())?;
+    response
+        .json::<ProvisionedApiKey>()
+        .await
+        .map_err(|_| OpenWaError::InvalidResponse)
+        .map(|response| response.api_key)
 }
 
 impl OpenWaClient for HttpOpenWaClient {
@@ -241,6 +297,24 @@ impl OpenWaClient for HttpOpenWaClient {
         }
         Err(OpenWaError::Server)
     }
+
+    async fn pairing_qr(&self) -> Result<serde_json::Value, OpenWaError> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/sessions/{}/qr",
+                self.api_base_url, self.session_id
+            ))
+            .header("X-API-Key", &self.api_key)
+            .send()
+            .await
+            .map_err(|_| OpenWaError::Transport)?;
+        ensure_success(response.status())?;
+        response
+            .json()
+            .await
+            .map_err(|_| OpenWaError::InvalidResponse)
+    }
 }
 
 async fn retry_delay(attempt: u32) {
@@ -289,6 +363,12 @@ struct WebhookResponse {
 #[serde(rename_all = "camelCase")]
 struct SendTextResponse {
     message_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProvisionedApiKey {
+    api_key: String,
 }
 
 #[cfg(test)]
