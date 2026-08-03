@@ -164,7 +164,7 @@ async fn main() -> anyhow::Result<()> {
     let coordinator = tokio::spawn(
         Coordinator::new(
             codex,
-            openwa_client,
+            openwa_client.clone(),
             state,
             state_path,
             runtime.openwa_session_id.clone(),

@@ -1395,9 +1395,13 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
     }
 
     async fn send_help(&mut self) {
-        self.send(&format!(
-            "[codex] Commands: `{0}new`, `{0}status`, `{0}stop`, `{0}approve <token>`, `{0}approve-session <token>`, `{0}deny <token>`, and `{0}answer <token> <answer>`. Any other message beginning with `{0}` starts a Codex turn.",
-        )).await;
+        self.send(
+            "[codex] Commands: `/new`, `/status`, `/stop`, `/approve <token>`, \
+             `/approve-session <token>`, `/deny <token>`, `/answer <token> <answer>`, \
+             `/whatsapp list-threads`, and `/whatsapp attach <thread-id>`. Any other \
+             message starts a Codex turn.",
+        )
+        .await;
     }
 
     async fn send(&mut self, text: &str) {
