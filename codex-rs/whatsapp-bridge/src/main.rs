@@ -31,7 +31,7 @@ use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio::time::Instant;
 
-const OPENWA_ADMINISTRATOR_KEY_PATH: &str = "/openwa-data/.api-key";
+const OPENWA_ADMINISTRATOR_KEY_PATH: &str = "/run/codex-whatsapp/openwa-administrator-key";
 const OPENWA_ADMINISTRATOR_KEY_WAIT: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]

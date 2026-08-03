@@ -29,7 +29,9 @@ services:
     build:
       context: ../..
       dockerfile: whatsapp-bridge/deploy/Dockerfile
-    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      CODEX_BRIDGE_UID: "${UID:-1000}"
+      CODEX_BRIDGE_GID: "${GID:-1000}"
     command: ["--config", "/codex-home/config.toml"]
     volumes:
       - ${CODEX_HOME:-${HOME}/.codex}/config.toml:/codex-home/config.toml:ro
