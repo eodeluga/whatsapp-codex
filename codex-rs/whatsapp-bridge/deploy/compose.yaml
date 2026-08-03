@@ -38,7 +38,7 @@ services:
       - ${CODEX_HOME:-${HOME}/.codex}/whatsapp:/codex-home/whatsapp
       - ${CODEX_HOME:-${HOME}/.codex}/app-server-control:/codex-home/app-server-control
       - openwa-data:/openwa-data:ro
-    networks: [bridge]
+    networks: [bridge, host-access]
     ports:
       - "127.0.0.1:8787:8787"
     depends_on:
@@ -54,6 +54,7 @@ services:
 networks:
   bridge:
     internal: true
+  host-access:
   openwa-egress:
 
 volumes:

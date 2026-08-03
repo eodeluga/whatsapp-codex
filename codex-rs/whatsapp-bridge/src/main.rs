@@ -6,6 +6,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
+use axum::response::Html;
 use axum::routing::get;
 use axum::routing::post;
 use codex_config::load_user_whatsapp_config;
@@ -288,15 +289,29 @@ async fn health_ready(State(state): State<WebhookState>) -> StatusCode {
     }
 }
 
-async fn pairing_qr(
-    State(state): State<WebhookState>,
-) -> Result<axum::Json<serde_json::Value>, StatusCode> {
-    state
+async fn pairing_qr(State(state): State<WebhookState>) -> Result<Html<String>, StatusCode> {
+    let response = state
         .openwa
         .pairing_qr()
         .await
-        .map(axum::Json)
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let qr_code = response
+        .get("qrCode")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let encoded = qr_code
+        .strip_prefix("data:image/png;base64,")
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    if encoded.is_empty()
+        || !encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+    {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    Ok(Html(format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"20\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Pair WhatsApp Codex</title></head><body style=\"font-family:sans-serif;text-align:center;margin:2rem\"><h1>Pair WhatsApp Codex</h1><p>In WhatsApp, open Linked devices and scan this code.</p><img src=\"{qr_code}\" alt=\"WhatsApp pairing QR code\" style=\"width:min(90vw,420px);height:auto\"><p>This page refreshes automatically while pairing.</p></body></html>"
+    )))
 }
 
 async fn openwa_webhook(
