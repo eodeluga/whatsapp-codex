@@ -22,11 +22,17 @@ use codex_whatsapp_bridge::state::BridgeState;
 use codex_whatsapp_bridge::webhook::filter_inbound;
 use codex_whatsapp_bridge::webhook::parse_verified_webhook;
 use std::env;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
+use tokio::time::Duration;
+use tokio::time::Instant;
+
+const OPENWA_ADMINISTRATOR_KEY_PATH: &str = "/openwa-data/.api-key";
+const OPENWA_ADMINISTRATOR_KEY_WAIT: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 struct WebhookState {
@@ -120,8 +126,7 @@ async fn main() -> anyhow::Result<()> {
         openwa_client.session_status().await,
         Err(codex_whatsapp_bridge::openwa::OpenWaError::Unauthorized)
     ) {
-        let administrator_key = std::fs::read_to_string("/openwa-data/.api-key")
-            .map_err(|_| anyhow::anyhow!("OpenWA administrator key is not ready"))?;
+        let administrator_key = wait_for_openwa_administrator_key().await?;
         runtime.openwa_api_key = provision_session(
             &runtime.openwa_api_base_url,
             &runtime.openwa_session_id,
@@ -217,6 +222,26 @@ async fn main() -> anyhow::Result<()> {
     let _ = coordinator.await;
     server_result?;
     Ok(())
+}
+
+async fn wait_for_openwa_administrator_key() -> anyhow::Result<String> {
+    tracing::info!("waiting for OpenWA administrator key");
+    let deadline = Instant::now() + OPENWA_ADMINISTRATOR_KEY_WAIT;
+    loop {
+        match tokio::fs::read_to_string(OPENWA_ADMINISTRATOR_KEY_PATH).await {
+            Ok(key) if !key.trim().is_empty() => return Ok(key),
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            anyhow::bail!(
+                "OpenWA administrator key was not written to {OPENWA_ADMINISTRATOR_KEY_PATH} within {OPENWA_ADMINISTRATOR_KEY_WAIT:?}"
+            );
+        }
+        tokio::time::sleep(remaining.min(Duration::from_secs(1))).await;
+    }
 }
 
 async fn wait_for_shutdown_signal() {
