@@ -97,36 +97,71 @@ impl HttpOpenWaClient {
     }
 }
 
-/// Creates and starts the private OpenWA session, returning its one-time
-/// session-scoped operator key. OpenWA owns the administrator credential; the
-/// bridge reads it only from the Docker-managed data volume.
+/// Resolves or creates and starts the private OpenWA session, returning its
+/// OpenWA UUID and one-time session-scoped operator key. OpenWA owns the
+/// administrator credential; the bridge reads it only from the Docker-managed
+/// data volume.
 pub async fn provision_session(
     api_base_url: &str,
-    session_id: &str,
+    session_reference: &str,
     administrator_key: &str,
-) -> Result<String, OpenWaError> {
+) -> Result<ProvisionedSession, OpenWaError> {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
         .build()
         .map_err(|_| OpenWaError::Transport)?;
     let api_base_url = api_base_url.trim_end_matches('/');
-    let create = client
-        .post(format!("{api_base_url}/sessions"))
+    let session_name = session_reference
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let response = client
+        .get(format!("{api_base_url}/sessions"))
         .header("X-API-Key", administrator_key)
-        .json(&json!({ "name": session_id }))
         .send()
         .await
         .map_err(|_| OpenWaError::Transport)?;
-    if !create.status().is_success() && create.status() != StatusCode::CONFLICT {
-        ensure_success(create.status())?;
-    }
-    let start = client
-        .post(format!("{api_base_url}/sessions/{session_id}/start"))
-        .header("X-API-Key", administrator_key)
-        .send()
+    ensure_success(response.status())?;
+    let sessions = response
+        .json::<Vec<ProvisioningSession>>()
         .await
-        .map_err(|_| OpenWaError::Transport)?;
-    if !start.status().is_success() && start.status() != StatusCode::CONFLICT {
+        .map_err(|_| OpenWaError::InvalidResponse)?;
+    let (session_id, should_start) = if let Some(session) = sessions
+        .into_iter()
+        .find(|session| session.id == session_reference || session.name == session_name)
+    {
+        (
+            session.id,
+            matches!(session.status.as_str(), "created" | "failed"),
+        )
+    } else {
+        let response = client
+            .post(format!("{api_base_url}/sessions"))
+            .header("X-API-Key", administrator_key)
+            .json(&json!({ "name": session_name }))
+            .send()
+            .await
+            .map_err(|_| OpenWaError::Transport)?;
+        ensure_success(response.status())?;
+        let session = response
+            .json::<ProvisioningSession>()
+            .await
+            .map_err(|_| OpenWaError::InvalidResponse)?;
+        (session.id, true)
+    };
+    if should_start {
+        let start = client
+            .post(format!("{api_base_url}/sessions/{session_id}/start"))
+            .header("X-API-Key", administrator_key)
+            .send()
+            .await
+            .map_err(|_| OpenWaError::Transport)?;
         ensure_success(start.status())?;
     }
     let response = client
@@ -135,17 +170,27 @@ pub async fn provision_session(
         .json(&json!({
             "name": "WhatsApp Codex bridge",
             "role": "operator",
-            "allowedSessions": [session_id],
+            "allowedSessions": [&session_id],
         }))
         .send()
         .await
         .map_err(|_| OpenWaError::Transport)?;
     ensure_success(response.status())?;
-    response
+    let api_key = response
         .json::<ProvisionedApiKey>()
         .await
         .map_err(|_| OpenWaError::InvalidResponse)
-        .map(|response| response.api_key)
+        .map(|response| response.api_key)?;
+    Ok(ProvisionedSession {
+        session_id,
+        api_key,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvisionedSession {
+    pub session_id: String,
+    pub api_key: String,
 }
 
 impl OpenWaClient for HttpOpenWaClient {
@@ -369,6 +414,13 @@ struct SendTextResponse {
 #[serde(rename_all = "camelCase")]
 struct ProvisionedApiKey {
     api_key: String,
+}
+
+#[derive(Deserialize)]
+struct ProvisioningSession {
+    id: String,
+    name: String,
+    status: String,
 }
 
 #[cfg(test)]

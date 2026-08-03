@@ -127,12 +127,14 @@ async fn main() -> anyhow::Result<()> {
         Err(codex_whatsapp_bridge::openwa::OpenWaError::Unauthorized)
     ) {
         let administrator_key = wait_for_openwa_administrator_key().await?;
-        runtime.openwa_api_key = provision_session(
+        let provisioned = provision_session(
             &runtime.openwa_api_base_url,
             &runtime.openwa_session_id,
             administrator_key.trim(),
         )
         .await?;
+        runtime.openwa_session_id = provisioned.session_id;
+        runtime.openwa_api_key = provisioned.api_key;
         save_whatsapp_runtime_config(codex_home, &runtime)?;
         openwa_client = HttpOpenWaClient::new(
             runtime.openwa_api_base_url.clone(),
@@ -315,7 +317,7 @@ async fn openwa_webhook(
 fn phone_digits(value: &str) -> String {
     value
         .chars()
-        .filter(|character| character.is_ascii_digit())
+        .filter(char::is_ascii_digit)
         .collect::<String>()
 }
 

@@ -19,6 +19,103 @@ async fn client(server: &MockServer) -> HttpOpenWaClient {
 }
 
 #[tokio::test]
+async fn provisions_with_a_valid_name_and_uses_the_returned_session_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/sessions"))
+        .and(header("X-API-Key", "administrator-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/sessions"))
+        .and(body_json(serde_json::json!({
+            "name": "codex-token-with-symbols"
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "id": "4ba3b15b-7966-41db-9ac7-25b1827acb75",
+            "name": "codex-token-with-symbols",
+            "status": "created"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/api/sessions/4ba3b15b-7966-41db-9ac7-25b1827acb75/start",
+        ))
+        .respond_with(ResponseTemplate::new(202))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/auth/api-keys"))
+        .and(body_json(serde_json::json!({
+            "name": "WhatsApp Codex bridge",
+            "role": "operator",
+            "allowedSessions": ["4ba3b15b-7966-41db-9ac7-25b1827acb75"]
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "apiKey": "session-operator-key"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    assert_eq!(
+        provision_session(
+            &format!("{}/api", server.uri()),
+            "codex-token_with-symbols",
+            "administrator-key",
+        )
+        .await,
+        Ok(ProvisionedSession {
+            session_id: "4ba3b15b-7966-41db-9ac7-25b1827acb75".to_string(),
+            api_key: "session-operator-key".to_string(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn reuses_an_existing_started_session() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/sessions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "id": "4ba3b15b-7966-41db-9ac7-25b1827acb75",
+                "name": "codex-existing-session",
+                "status": "qr_ready"
+            }])),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/auth/api-keys"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "apiKey": "session-operator-key"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    assert_eq!(
+        provision_session(
+            &format!("{}/api", server.uri()),
+            "codex-existing-session",
+            "administrator-key",
+        )
+        .await,
+        Ok(ProvisionedSession {
+            session_id: "4ba3b15b-7966-41db-9ac7-25b1827acb75".to_string(),
+            api_key: "session-operator-key".to_string(),
+        })
+    );
+}
+
+#[tokio::test]
 async fn sends_text_with_the_api_key_and_reads_message_id() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
