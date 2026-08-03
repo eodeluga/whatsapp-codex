@@ -924,13 +924,14 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
                     self.start_next_prompt().await;
                 }
             }
-            ServerNotification::Error(error) if !error.will_retry => {
-                if self.state.active_turn.as_ref().is_some_and(|active| {
-                    active.thread_id == error.thread_id && active.codex_turn_id == error.turn_id
-                }) {
-                    self.send(&format!("[codex] Codex error: {}", error.error.message))
-                        .await;
-                }
+            ServerNotification::Error(error)
+                if !error.will_retry
+                    && self.state.active_turn.as_ref().is_some_and(|active| {
+                        active.thread_id == error.thread_id && active.codex_turn_id == error.turn_id
+                    }) =>
+            {
+                self.send(&format!("[codex] Codex error: {}", error.error.message))
+                    .await;
             }
             ServerNotification::ServerRequestResolved(resolved) => {
                 self.pending_requests
@@ -1543,10 +1544,7 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
 }
 
 fn normalize_phone(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| character.is_ascii_digit())
-        .collect()
+    value.chars().filter(char::is_ascii_digit).collect()
 }
 
 fn reconnect_delay_with_jitter(base: std::time::Duration) -> std::time::Duration {
