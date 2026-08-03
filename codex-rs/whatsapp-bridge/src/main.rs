@@ -118,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
     let configured_phone = config
         .account_phone_number
         .as_deref()
-        .expect("validated phone number")
+        .ok_or_else(|| anyhow::anyhow!("configured WhatsApp phone number is missing"))?
         .trim_start_matches('+')
         .to_string();
     let webhook_secret = runtime.webhook_signing_secret.clone();
@@ -144,22 +144,29 @@ async fn main() -> anyhow::Result<()> {
     }
     let openwa_healthy = match openwa_client.session_status().await {
         Ok(session) => {
-            if !session.status.eq_ignore_ascii_case("ready")
-                || session
-                    .phone
-                    .as_deref()
-                    .is_some_and(|phone| phone_digits(phone) != configured_phone)
+            if session
+                .phone
+                .as_deref()
+                .is_some_and(|phone| phone_digits(phone) != configured_phone)
             {
-                anyhow::bail!("configured WhatsApp account does not match a ready OpenWA session");
+                anyhow::bail!("paired WhatsApp account does not match the configured phone number");
             }
-            let registered = openwa_client
-                .register_webhook(runtime.webhook_url.clone(), webhook_secret.clone())
-                .await
-                .is_ok();
-            if !registered {
-                tracing::warn!("OpenWA webhook registration failed; bridge is not ready");
+            if !session.status.eq_ignore_ascii_case("ready") {
+                tracing::info!(
+                    status = session.status,
+                    "OpenWA session is waiting for WhatsApp pairing"
+                );
+                false
+            } else {
+                let registered = openwa_client
+                    .register_webhook(runtime.webhook_url.clone(), webhook_secret.clone())
+                    .await
+                    .is_ok();
+                if !registered {
+                    tracing::warn!("OpenWA webhook registration failed; bridge is not ready");
+                }
+                registered
             }
-            registered
         }
         Err(_) => {
             tracing::warn!("OpenWA is unavailable; bridge will retry in the background");
@@ -250,11 +257,21 @@ async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
         let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("SIGTERM handler");
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(signal) => Some(signal),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to install SIGTERM handler");
+                    None
+                }
+            };
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
-            _ = terminate.recv() => {}
+            _ = async {
+                match terminate.as_mut() {
+                    Some(signal) => signal.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {}
         }
     }
     #[cfg(not(unix))]
