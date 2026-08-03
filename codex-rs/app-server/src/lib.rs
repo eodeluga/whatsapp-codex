@@ -1323,7 +1323,7 @@ fn test_user_config_file_from_env() -> Option<std::path::PathBuf> {
 }
 
 fn loader_overrides_with_test_user_config_file(
-    loader_overrides: LoaderOverrides,
+    mut loader_overrides: LoaderOverrides,
     test_user_config_file: Option<std::path::PathBuf>,
 ) -> IoResult<LoaderOverrides> {
     #[cfg(debug_assertions)]
