@@ -290,6 +290,17 @@ async fn health_ready(State(state): State<WebhookState>) -> StatusCode {
 }
 
 async fn pairing_qr(State(state): State<WebhookState>) -> Result<Html<String>, StatusCode> {
+    let session = state
+        .openwa
+        .session_status()
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if session.status == "ready" {
+        return Ok(Html(
+            "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>WhatsApp Codex pairing complete</title></head><body style=\"font-family:sans-serif;text-align:center;margin:2rem\"><h1>Pairing complete</h1><p>WhatsApp Codex is connected. You may now close this page.</p></body></html>"
+                .to_string(),
+        ));
+    }
     let response = state
         .openwa
         .pairing_qr()
