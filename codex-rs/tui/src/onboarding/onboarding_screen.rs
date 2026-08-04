@@ -162,7 +162,7 @@ impl OnboardingScreen {
         if show_trust_screen {
             steps.push(Step::TrustDirectory(TrustDirectoryWidget {
                 cwd: cwd.clone(),
-                trust_target: cwd.clone(),
+                trust_target: cwd,
                 show_windows_create_sandbox_hint,
                 should_quit: false,
                 selection: None,

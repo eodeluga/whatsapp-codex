@@ -2091,11 +2091,16 @@ async fn start_whatsapp_app_server_daemon(
             endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
         });
     }
-    let mut child = tokio::process::Command::new(codex_executable)
+    let user_home = dirs::home_dir()
+        .ok_or_else(|| color_eyre::eyre::eyre!("could not locate the user home directory"))?;
+    let mut child = tokio::process::Command::new(codex_executable);
+    child
         .args(["app-server", "--listen", "unix://"])
+        .current_dir(user_home)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = child
         .spawn()
         .wrap_err("failed to start the local Codex app-server")?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
