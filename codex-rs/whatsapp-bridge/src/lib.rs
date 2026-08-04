@@ -7,3 +7,8 @@ pub mod openwa;
 pub mod output;
 pub mod state;
 pub mod webhook;
+
+mod command_catalog;
+
+pub use command_catalog::CommandCatalog;
+pub use command_catalog::CommandCatalogError;

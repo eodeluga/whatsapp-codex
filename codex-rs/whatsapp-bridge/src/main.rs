@@ -12,6 +12,7 @@ use axum::routing::post;
 use codex_config::load_user_whatsapp_config;
 use codex_config::load_whatsapp_runtime_config;
 use codex_config::save_whatsapp_runtime_config;
+use codex_whatsapp_bridge::CommandCatalog;
 use codex_whatsapp_bridge::codex::CodexClient;
 use codex_whatsapp_bridge::codex::RemoteCodexClient;
 use codex_whatsapp_bridge::coordinator::Coordinator;
@@ -73,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
     let codex_home = config_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("WhatsApp config path has no parent directory"))?;
+    let (command_catalog, command_catalog_path) = CommandCatalog::load_or_create(codex_home)?;
     let mut runtime = load_whatsapp_runtime_config(codex_home)?;
     let self_chat_id = config.self_chat_jid()?;
     let socket_path = codex_app_server_client::app_server_control_socket_path(codex_home)?;
@@ -201,6 +203,8 @@ async fn main() -> anyhow::Result<()> {
             runtime.max_queued_prompts,
             runtime.dedupe_capacity,
             runtime.dedupe_ttl_hours,
+            command_catalog,
+            command_catalog_path,
             Arc::clone(&ready),
             app_server_connected,
             openwa_healthy,

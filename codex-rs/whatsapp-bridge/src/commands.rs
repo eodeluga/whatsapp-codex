@@ -24,7 +24,7 @@ pub fn parse_command(message: &str) -> BridgeCommand {
         "/new" => BridgeCommand::New,
         "/status" => BridgeCommand::Status,
         "/stop" => BridgeCommand::Stop,
-        "/help" => BridgeCommand::Help,
+        "/" | "/help" => BridgeCommand::Help,
         "/whatsapp list-threads" => BridgeCommand::WhatsAppListThreads,
         _ if command.starts_with("/whatsapp attach ") => command
             .strip_prefix("/whatsapp attach ")

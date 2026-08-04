@@ -1,5 +1,6 @@
 //! Single-owner conversation state machine for the WhatsApp bridge.
 
+use crate::CommandCatalog;
 use crate::codex::CodexClient;
 use crate::codex::CodexError;
 use crate::commands::BridgeCommand;
@@ -119,6 +120,8 @@ pub struct Coordinator<C, O> {
     max_queued_prompts: usize,
     dedupe_capacity: usize,
     dedupe_ttl_hours: u64,
+    command_catalog: CommandCatalog,
+    command_catalog_path: PathBuf,
     output: OutputAggregator,
     file_change_paths: HashMap<(String, String, String), Vec<String>>,
     pending_requests: HashMap<String, PendingRequest>,
@@ -150,6 +153,8 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
         max_queued_prompts: usize,
         dedupe_capacity: usize,
         dedupe_ttl_hours: u64,
+        command_catalog: CommandCatalog,
+        command_catalog_path: PathBuf,
         ready: Arc<AtomicBool>,
         app_server_connected: bool,
         openwa_healthy: bool,
@@ -169,6 +174,8 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
             max_queued_prompts,
             dedupe_capacity,
             dedupe_ttl_hours,
+            command_catalog,
+            command_catalog_path,
             output: OutputAggregator::default(),
             file_change_paths: HashMap::new(),
             pending_requests: HashMap::new(),
@@ -1438,13 +1445,25 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
     }
 
     async fn send_help(&mut self) {
-        self.send(
-            "[codex] Commands: `/new`, `/status`, `/stop`, `/approve <token>`, \
-             `/approve-session <token>`, `/deny <token>`, `/answer <token> <answer>`, \
-             `/whatsapp list-threads`, and `/whatsapp attach <thread-id>`. Any other \
-             message starts a Codex turn.",
-        )
-        .await;
+        match CommandCatalog::load(&self.command_catalog_path) {
+            Ok(catalog) => {
+                self.command_catalog = catalog;
+                let help = self.command_catalog.render_help();
+                self.send(&format!("[codex] {help}")).await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    path = %self.command_catalog_path.display(),
+                    %error,
+                    "failed to reload WhatsApp command catalogue"
+                );
+                self.send(&format!(
+                    "[codex] Could not load the command catalogue at `{}`: {error}.",
+                    self.command_catalog_path.display()
+                ))
+                .await;
+            }
+        }
     }
 
     async fn send(&mut self, text: &str) {
@@ -1466,11 +1485,12 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
             }
             return None;
         }
+        let text = self.command_catalog.rewrite_legacy_prefix(text);
         let response_id = Uuid::new_v4().simple().to_string();
         self.state.outbox.push(OutboundMessage {
             response_id: response_id.clone(),
             chat_id: self.self_chat_id.clone(),
-            body: text.to_string(),
+            body: text,
             attempts: 0,
         });
         if self.state.save(&self.state_path).is_err() {
