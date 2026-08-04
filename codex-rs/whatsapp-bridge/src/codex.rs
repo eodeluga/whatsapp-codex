@@ -26,8 +26,14 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CodexError {
-    #[error("failed to communicate with Codex app-server")]
-    Transport,
+    #[error("failed to communicate with Codex app-server: {0}")]
+    Transport(String),
+}
+
+impl CodexError {
+    fn transport(error: impl std::fmt::Display) -> Self {
+        Self::Transport(error.to_string())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,7 +141,9 @@ impl RemoteCodexClient {
     }
 
     fn client(&self) -> Result<&RemoteAppServerClient, CodexError> {
-        self.client.as_ref().ok_or(CodexError::Transport)
+        self.client
+            .as_ref()
+            .ok_or_else(|| CodexError::Transport("client is disconnected".to_string()))
     }
 
     fn request_id(&self) -> codex_app_server_protocol::RequestId {
@@ -158,7 +166,7 @@ async fn connect_client(
         channel_capacity: 128,
     })
     .await
-    .map_err(|_| CodexError::Transport)
+    .map_err(CodexError::transport)
 }
 
 impl CodexClient for RemoteCodexClient {
@@ -174,7 +182,7 @@ impl CodexClient for RemoteCodexClient {
                 },
             })
             .await
-            .map_err(|_| CodexError::Transport)?;
+            .map_err(CodexError::transport)?;
         Ok(response.thread.id)
     }
 
@@ -189,7 +197,7 @@ impl CodexClient for RemoteCodexClient {
                 },
             })
             .await
-            .map_err(|_| CodexError::Transport)?;
+            .map_err(CodexError::transport)?;
         Ok(response)
     }
 
@@ -215,7 +223,7 @@ impl CodexClient for RemoteCodexClient {
                 },
             })
             .await
-            .map_err(|_| CodexError::Transport)?;
+            .map_err(CodexError::transport)?;
         Ok(response
             .data
             .into_iter()
@@ -247,7 +255,7 @@ impl CodexClient for RemoteCodexClient {
                 },
             })
             .await
-            .map_err(|_| CodexError::Transport)?;
+            .map_err(CodexError::transport)?;
         Ok(response.turn.id)
     }
 
@@ -259,7 +267,7 @@ impl CodexClient for RemoteCodexClient {
                 params: TurnInterruptParams { thread_id, turn_id },
             })
             .await
-            .map_err(|_| CodexError::Transport)?;
+            .map_err(CodexError::transport)?;
         Ok(())
     }
 
@@ -281,7 +289,7 @@ impl CodexClient for RemoteCodexClient {
                 },
             )
             .await
-            .map_err(|_| CodexError::Transport)
+            .map_err(CodexError::transport)
     }
 
     async fn resolve_server_request(
@@ -292,7 +300,7 @@ impl CodexClient for RemoteCodexClient {
         self.client()?
             .resolve_server_request(request_id, result)
             .await
-            .map_err(|_| CodexError::Transport)
+            .map_err(CodexError::transport)
     }
 
     async fn reconnect(&mut self) -> Result<(), CodexError> {
@@ -304,6 +312,6 @@ impl CodexClient for RemoteCodexClient {
         let Some(client) = self.client.take() else {
             return Ok(());
         };
-        client.shutdown().await.map_err(|_| CodexError::Transport)
+        client.shutdown().await.map_err(CodexError::transport)
     }
 }

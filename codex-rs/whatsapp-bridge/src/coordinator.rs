@@ -5,6 +5,7 @@ use crate::codex::CodexError;
 use crate::commands::BridgeCommand;
 use crate::commands::parse_command;
 use crate::openwa::OpenWaClient;
+use crate::openwa::session_needs_start;
 use crate::output::OutputAggregator;
 use crate::output::labelled_chunks;
 use crate::state::BridgeState;
@@ -184,6 +185,24 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
     }
 
     pub async fn run(mut self, mut commands: mpsc::Receiver<CoordinatorCommand>) {
+        let legacy_failure = "[codex] Codex app-server is unavailable.";
+        if self
+            .state
+            .outbox
+            .iter()
+            .any(|message| message.body == legacy_failure)
+        {
+            self.state
+                .outbox
+                .retain(|message| message.body != legacy_failure);
+            if let Some(prompt) = self.state.queued_prompts.first_mut() {
+                prompt.failure_notified = true;
+            }
+            if self.state.save(&self.state_path).is_err() {
+                self.state_healthy = false;
+                self.refresh_readiness();
+            }
+        }
         let _ = self.flush_outbox().await;
         if self.app_server_connected && self.state.binding.is_some() {
             self.app_server_connected = self.resume_after_reconnect().await;
@@ -289,6 +308,9 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
         let should_register_webhook = !self.webhook_registered;
         let healthy = match self.openwa.session_status().await {
             Ok(session) => {
+                if session_needs_start(&session.status) {
+                    let _ = self.openwa.start_session().await;
+                }
                 let session_ready = session.status.eq_ignore_ascii_case("ready")
                     && session
                         .phone
@@ -484,6 +506,7 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
                         body,
                         accepted_at: now,
                         submission_uncertain: false,
+                        failure_notified: false,
                     };
                     self.state.queued_prompts.push(prompt);
                     if self.state.active_turn.is_some() {
@@ -625,10 +648,29 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
                         return;
                     }
                 }
-                Err(_) => {
+                Err(error) => {
                     self.app_server_connected = false;
                     self.refresh_readiness();
-                    self.send("[codex] Codex app-server is unavailable.").await;
+                    tracing::warn!(%error, "failed to start a Codex thread for a queued WhatsApp prompt");
+                    let should_notify = self
+                        .state
+                        .queued_prompts
+                        .first_mut()
+                        .filter(|queued| queued.message_id == prompt.message_id)
+                        .is_some_and(|queued| {
+                            let should_notify = !queued.failure_notified;
+                            queued.failure_notified = true;
+                            should_notify
+                        });
+                    if should_notify {
+                        if self.state.save(&self.state_path).is_err() {
+                            self.state_healthy = false;
+                            self.refresh_readiness();
+                            return;
+                        }
+                        self.send("[codex] Codex app-server is unavailable; your prompt is queued and will retry automatically.")
+                            .await;
+                    }
                     return;
                 }
             },
@@ -815,7 +857,7 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
             .await
         {
             Ok(()) => self.send("[codex] Interrupt requested.").await,
-            Err(CodexError::Transport) => {
+            Err(CodexError::Transport(_)) => {
                 self.app_server_connected = false;
                 self.refresh_readiness();
                 self.send("[codex] Could not interrupt the turn.").await;

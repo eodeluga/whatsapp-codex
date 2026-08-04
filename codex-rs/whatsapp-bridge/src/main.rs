@@ -19,6 +19,7 @@ use codex_whatsapp_bridge::coordinator::CoordinatorCommand;
 use codex_whatsapp_bridge::openwa::HttpOpenWaClient;
 use codex_whatsapp_bridge::openwa::OpenWaClient;
 use codex_whatsapp_bridge::openwa::provision_session;
+use codex_whatsapp_bridge::openwa::session_needs_start;
 use codex_whatsapp_bridge::state::BridgeState;
 use codex_whatsapp_bridge::webhook::filter_inbound;
 use codex_whatsapp_bridge::webhook::parse_verified_webhook;
@@ -153,6 +154,14 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("paired WhatsApp account does not match the configured phone number");
             }
             if !session.status.eq_ignore_ascii_case("ready") {
+                if session_needs_start(&session.status)
+                    && openwa_client.start_session().await.is_err()
+                {
+                    tracing::warn!(
+                        status = session.status,
+                        "failed to restart the persisted OpenWA session"
+                    );
+                }
                 tracing::info!(
                     status = session.status,
                     "OpenWA session is waiting for WhatsApp pairing"

@@ -29,6 +29,8 @@ pub trait OpenWaClient: Send + Sync {
         &self,
     ) -> impl std::future::Future<Output = Result<OpenWaSession, OpenWaError>> + Send;
 
+    fn start_session(&self) -> impl std::future::Future<Output = Result<(), OpenWaError>> + Send;
+
     fn send_text(
         &self,
         chat_id: String,
@@ -141,10 +143,7 @@ pub async fn provision_session(
         .into_iter()
         .find(|session| session.id == session_reference || session.name == session_name)
     {
-        (
-            session.id,
-            matches!(session.status.as_str(), "created" | "failed"),
-        )
+        (session.id, session_needs_start(&session.status))
     } else {
         let response = client
             .post(format!("{api_base_url}/sessions"))
@@ -215,6 +214,20 @@ impl OpenWaClient for HttpOpenWaClient {
             .json()
             .await
             .map_err(|_| OpenWaError::InvalidResponse)
+    }
+
+    async fn start_session(&self) -> Result<(), OpenWaError> {
+        let response = self
+            .client
+            .post(format!(
+                "{}/sessions/{}/start",
+                self.api_base_url, self.session_id
+            ))
+            .header("X-API-Key", &self.api_key)
+            .send()
+            .await
+            .map_err(|_| OpenWaError::Transport)?;
+        ensure_success(response.status())
     }
 
     async fn send_text(&self, chat_id: String, text: String) -> Result<String, OpenWaError> {
@@ -384,6 +397,10 @@ impl OpenWaClient for HttpOpenWaClient {
             .map_err(|_| OpenWaError::InvalidResponse)
             .map(|response| response.phone)
     }
+}
+
+pub fn session_needs_start(status: &str) -> bool {
+    matches!(status, "created" | "disconnected" | "failed" | "stopped")
 }
 
 async fn retry_delay(attempt: u32) {

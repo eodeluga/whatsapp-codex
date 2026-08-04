@@ -56,6 +56,8 @@ pub struct QueuedPrompt {
     pub accepted_at: u64,
     #[serde(default)]
     pub submission_uncertain: bool,
+    #[serde(default)]
+    pub failure_notified: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

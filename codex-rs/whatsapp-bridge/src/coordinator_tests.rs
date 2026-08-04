@@ -11,15 +11,20 @@ use tempfile::tempdir;
 #[derive(Clone, Default)]
 struct FakeCodex {
     turns: Arc<Mutex<Vec<(String, String, String)>>>,
+    start_thread_fails: Arc<AtomicBool>,
 }
 
 impl CodexClient for FakeCodex {
     async fn start_thread(&self) -> Result<String, CodexError> {
-        Ok("thread-1".to_string())
+        if self.start_thread_fails.load(Ordering::Acquire) {
+            Err(CodexError::Transport("test failure".to_string()))
+        } else {
+            Ok("thread-1".to_string())
+        }
     }
 
     async fn resume_thread(&self, _thread_id: String) -> Result<ThreadResumeResponse, CodexError> {
-        Err(CodexError::Transport)
+        Err(CodexError::Transport("test failure".to_string()))
     }
 
     async fn list_threads(&self) -> Result<Vec<ThreadSummary>, CodexError> {
@@ -79,6 +84,10 @@ impl OpenWaClient for FakeOpenWa {
             status: "ready".to_string(),
             phone: Some("447700900000".to_string()),
         })
+    }
+
+    async fn start_session(&self) -> Result<(), OpenWaError> {
+        Ok(())
     }
 
     async fn send_text(&self, _chat_id: String, text: String) -> Result<String, OpenWaError> {
@@ -180,4 +189,73 @@ async fn durable_deduplication_starts_one_turn_for_a_replayed_webhook() {
             .map(|turn| turn.codex_turn_id.as_str()),
         Some("turn-1")
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn app_server_retries_notify_once_for_a_queued_prompt() {
+    let directory = tempdir().unwrap();
+    let state_path = directory.path().join("state.json");
+    let codex = FakeCodex::default();
+    codex.start_thread_fails.store(true, Ordering::Release);
+    let openwa = FakeOpenWa::default();
+    let sent = Arc::clone(&openwa.sent);
+    let ready = Arc::new(AtomicBool::new(true));
+    let (commands, command_rx) = mpsc::channel(8);
+    let coordinator = Coordinator::new(
+        codex,
+        openwa,
+        BridgeState::empty(),
+        state_path.clone(),
+        "personal".to_string(),
+        "447700900000".to_string(),
+        "http://bridge/webhooks/openwa".to_string(),
+        "secret".to_string(),
+        "447700900000@c.us".to_string(),
+        3_500,
+        1_500,
+        20,
+        100,
+        24,
+        ready,
+        true,
+        true,
+    );
+    let task = tokio::spawn(coordinator.run(command_rx));
+    let (accepted, accepted_rx) = tokio::sync::oneshot::channel();
+    commands
+        .send(CoordinatorCommand::Inbound {
+            message: InboundMessage {
+                idempotency_key: "event-1".to_string(),
+                message_id: "message-1".to_string(),
+                chat_id: "447700900000@c.us".to_string(),
+                body: "inspect the current project".to_string(),
+            },
+            accepted,
+        })
+        .await
+        .unwrap();
+    assert!(accepted_rx.await.unwrap());
+
+    tokio::time::advance(std::time::Duration::from_secs(120)).await;
+    for _ in 0..5 {
+        tokio::task::yield_now().await;
+    }
+
+    let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+    commands
+        .send(CoordinatorCommand::Shutdown(shutdown))
+        .await
+        .unwrap();
+    shutdown_rx.await.unwrap();
+    task.await.unwrap();
+
+    assert_eq!(
+        sent.lock()
+            .unwrap()
+            .iter()
+            .filter(|message| message.contains("app-server is unavailable"))
+            .count(),
+        1
+    );
+    assert!(BridgeState::load(&state_path).unwrap().queued_prompts[0].failure_notified);
 }

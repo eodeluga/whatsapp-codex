@@ -142,6 +142,20 @@ async fn sends_text_with_the_api_key_and_reads_message_id() {
 }
 
 #[tokio::test]
+async fn starts_a_persisted_session() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sessions/personal/start"))
+        .and(header("X-API-Key", "operator-key"))
+        .respond_with(ResponseTemplate::new(202))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    assert_eq!(client(&server).await.start_session().await, Ok(()));
+}
+
+#[tokio::test]
 async fn resolves_a_lid_to_its_phone_number() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
