@@ -85,6 +85,8 @@ as `Summarise the current project`, starts a normal Codex turn.
 The terminal and WhatsApp use the same normal Codex history. WhatsApp also
 provides:
 
+- `/help` (or `/`) to display the configured WhatsApp and standard Codex
+  slash-command catalogue;
 - `/whatsapp list-threads` to list recent resumable Codex threads; and
 - `/whatsapp attach <thread-id>` to select one explicitly.
 
@@ -101,8 +103,16 @@ account_phone_number = "+447700900000"
 ```
 
 Private runtime data is stored under `~/.codex/whatsapp/`. There is no
-WhatsApp-specific workspace, message prefix, OpenWA API key, webhook URL, or
-Docker environment variable to configure.
+WhatsApp-specific workspace, required input prefix, OpenWA API key, webhook
+URL, or Docker environment variable to configure.
+
+The gateway creates a user-editable command and display catalogue at
+`~/.codex/whatsapp/commands.json` the first time it starts. This file contains
+the WhatsApp controls, the standard Codex TUI slash commands, help headings and
+footer, and the outbound response prefix. Editing it does not require rebuilding
+either binary or container: send `/help` to reload and display the catalogue.
+The catalogue controls discovery text only; it cannot enable a command that the
+WhatsApp transport does not implement.
 
 ## Operations
 

@@ -25,6 +25,14 @@ The bridge reads the user-owned `[whatsapp]` table from Codex's normal
 `CODEX_HOME/whatsapp/runtime.json`. Users must not create OpenWA credentials,
 session IDs, API keys, webhook URLs, or signing secrets manually.
 
+On first start, the bridge also creates the user-editable command catalogue at
+`CODEX_HOME/whatsapp/commands.json`. `/help` and `/` reload that file, so command
+descriptions, help grouping, footer text, and the outbound response prefix can
+be changed without rebuilding or restarting the bridge. The default catalogue
+contains both commands available through WhatsApp and the complete standard
+Codex TUI command reference. Catalogue entries are display metadata and do not
+alter command parsing, permissions, or execution.
+
 ## Start the deployment
 
 Run this from the repository root after the compiled Codex TUI is running:
