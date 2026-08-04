@@ -51,6 +51,11 @@ pub trait OpenWaClient: Send + Sync {
     fn pairing_qr(
         &self,
     ) -> impl std::future::Future<Output = Result<serde_json::Value, OpenWaError>> + Send;
+
+    fn resolve_phone(
+        &self,
+        contact_id: String,
+    ) -> impl std::future::Future<Output = Result<Option<String>, OpenWaError>> + Send;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -360,6 +365,25 @@ impl OpenWaClient for HttpOpenWaClient {
             .await
             .map_err(|_| OpenWaError::InvalidResponse)
     }
+
+    async fn resolve_phone(&self, contact_id: String) -> Result<Option<String>, OpenWaError> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/sessions/{}/contacts/{contact_id}/phone",
+                self.api_base_url, self.session_id
+            ))
+            .header("X-API-Key", &self.api_key)
+            .send()
+            .await
+            .map_err(|_| OpenWaError::Transport)?;
+        ensure_success(response.status())?;
+        response
+            .json::<ResolvedPhone>()
+            .await
+            .map_err(|_| OpenWaError::InvalidResponse)
+            .map(|response| response.phone)
+    }
 }
 
 async fn retry_delay(attempt: u32) {
@@ -408,6 +432,11 @@ struct WebhookResponse {
 #[serde(rename_all = "camelCase")]
 struct SendTextResponse {
     message_id: String,
+}
+
+#[derive(Deserialize)]
+struct ResolvedPhone {
+    phone: Option<String>,
 }
 
 #[derive(Deserialize)]

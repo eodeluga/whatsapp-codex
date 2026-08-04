@@ -103,6 +103,10 @@ impl OpenWaClient for FakeOpenWa {
     async fn pairing_qr(&self) -> Result<serde_json::Value, OpenWaError> {
         Ok(serde_json::Value::Null)
     }
+
+    async fn resolve_phone(&self, _contact_id: String) -> Result<Option<String>, OpenWaError> {
+        Ok(None)
+    }
 }
 
 #[tokio::test]

@@ -328,7 +328,15 @@ async fn openwa_webhook(
     let Ok(webhook) = parse_verified_webhook(&state.secret, signature, &body) else {
         return StatusCode::UNAUTHORIZED;
     };
-    let Some(message) = filter_inbound(webhook, &state.session_id, &state.self_chat_id, |_| false)
+    let openwa = state.openwa.clone();
+    let Some(message) = filter_inbound(
+        webhook,
+        &state.session_id,
+        &state.self_chat_id,
+        |_| false,
+        move |contact_id| async move { openwa.resolve_phone(contact_id).await.ok().flatten() },
+    )
+    .await
     else {
         return StatusCode::NO_CONTENT;
     };

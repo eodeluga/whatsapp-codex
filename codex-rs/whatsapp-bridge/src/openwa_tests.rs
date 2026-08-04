@@ -142,6 +142,31 @@ async fn sends_text_with_the_api_key_and_reads_message_id() {
 }
 
 #[tokio::test]
+async fn resolves_a_lid_to_its_phone_number() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/api/sessions/personal/contacts/172662718488742@lid/phone",
+        ))
+        .and(header("X-API-Key", "operator-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "contactId": "172662718488742@lid",
+            "phone": "447700900000"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    assert_eq!(
+        client(&server)
+            .await
+            .resolve_phone("172662718488742@lid".to_string())
+            .await,
+        Ok(Some("447700900000".to_string()))
+    );
+}
+
+#[tokio::test]
 async fn edits_text_using_the_documented_request_shape() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

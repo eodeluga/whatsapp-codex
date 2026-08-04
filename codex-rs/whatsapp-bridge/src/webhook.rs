@@ -25,11 +25,15 @@ pub struct OpenWaMessage {
     pub from: String,
     pub to: String,
     #[serde(default)]
+    pub chat_id: Option<String>,
+    #[serde(default)]
     pub body: String,
     #[serde(rename = "type")]
     pub message_type: String,
     #[serde(default)]
     pub is_group: bool,
+    #[serde(default)]
+    pub from_me: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,23 +75,30 @@ pub fn parse_verified_webhook(
     serde_json::from_slice(body).map_err(|_| WebhookError::InvalidBody)
 }
 
-pub fn filter_inbound(
+pub async fn filter_inbound<ResolvePhone, ResolvePhoneFuture>(
     webhook: OpenWaWebhook,
     session_id: &str,
     self_chat_id: &str,
     outbound_message_ids: impl Fn(&str) -> bool,
-) -> Option<InboundMessage> {
+    resolve_phone: ResolvePhone,
+) -> Option<InboundMessage>
+where
+    ResolvePhone: FnOnce(String) -> ResolvePhoneFuture,
+    ResolvePhoneFuture: std::future::Future<Output = Option<String>>,
+{
     if !matches!(webhook.event.as_str(), "message.received" | "message.sent")
         || webhook.session_id != session_id
     {
         return None;
     }
     let message = serde_json::from_value::<OpenWaMessage>(webhook.data).ok()?;
-    if message.message_type != "chat" || message.is_group || outbound_message_ids(&message.id) {
+    if !matches!(message.message_type.as_str(), "chat" | "text")
+        || message.is_group
+        || outbound_message_ids(&message.id)
+    {
         return None;
     }
-    let chat_id = normalized_chat_id(&message.from, &message.to)?;
-    if chat_id != self_chat_id {
+    if !is_self_chat(&message, self_chat_id, resolve_phone).await {
         return None;
     }
     Some(InboundMessage {
@@ -95,13 +106,34 @@ pub fn filter_inbound(
             .idempotency_key
             .unwrap_or_else(|| message.id.clone()),
         message_id: message.id,
-        chat_id,
+        chat_id: self_chat_id.to_string(),
         body: message.body,
     })
 }
 
-fn normalized_chat_id(from: &str, to: &str) -> Option<String> {
-    (from == to && from.ends_with("@c.us")).then(|| from.to_string())
+async fn is_self_chat<ResolvePhone, ResolvePhoneFuture>(
+    message: &OpenWaMessage,
+    self_chat_id: &str,
+    resolve_phone: ResolvePhone,
+) -> bool
+where
+    ResolvePhone: FnOnce(String) -> ResolvePhoneFuture,
+    ResolvePhoneFuture: std::future::Future<Output = Option<String>>,
+{
+    if message.from == self_chat_id && message.to == self_chat_id {
+        return true;
+    }
+    if !message.from_me || message.from != self_chat_id {
+        return false;
+    }
+    let contact_id = message.chat_id.as_deref().unwrap_or(&message.to);
+    if !contact_id.ends_with("@lid") {
+        return false;
+    }
+    let Some(expected_phone) = self_chat_id.strip_suffix("@c.us") else {
+        return false;
+    };
+    resolve_phone(contact_id.to_string()).await.as_deref() == Some(expected_phone)
 }
 
 fn hex_decode(value: &str) -> Result<Vec<u8>, ()> {
