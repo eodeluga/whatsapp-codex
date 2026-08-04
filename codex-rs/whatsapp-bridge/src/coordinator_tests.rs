@@ -126,6 +126,8 @@ async fn durable_deduplication_starts_one_turn_for_a_replayed_webhook() {
     let recorded_turns = Arc::clone(&codex.turns);
     let ready = Arc::new(AtomicBool::new(true));
     let (commands, command_rx) = mpsc::channel(8);
+    let (command_catalog, command_catalog_path) =
+        CommandCatalog::load_or_create(directory.path()).unwrap();
     let coordinator = Coordinator::new(
         codex,
         FakeOpenWa::default(),
@@ -141,6 +143,8 @@ async fn durable_deduplication_starts_one_turn_for_a_replayed_webhook() {
         20,
         100,
         24,
+        command_catalog,
+        command_catalog_path,
         ready,
         true,
         true,
@@ -191,6 +195,90 @@ async fn durable_deduplication_starts_one_turn_for_a_replayed_webhook() {
     );
 }
 
+#[tokio::test]
+async fn help_reloads_the_user_command_catalog() {
+    let directory = tempdir().unwrap();
+    let state_path = directory.path().join("state.json");
+    let codex = FakeCodex::default();
+    let openwa = FakeOpenWa::default();
+    let sent = Arc::clone(&openwa.sent);
+    let ready = Arc::new(AtomicBool::new(true));
+    let (commands, command_rx) = mpsc::channel(8);
+    let (command_catalog, command_catalog_path) =
+        CommandCatalog::load_or_create(directory.path()).unwrap();
+    std::fs::write(
+        &command_catalog_path,
+        r#"{
+          "schemaVersion": 1,
+          "responsePrefix": "[remote]",
+          "helpHeading": "My commands",
+          "helpFooter": "Configured on disk.",
+          "groups": [{
+            "heading": "Session",
+            "commands": [{"usage": "/status", "description": "show status"}]
+          }]
+        }"#,
+    )
+    .unwrap();
+    let coordinator = Coordinator::new(
+        codex,
+        openwa,
+        BridgeState::empty(),
+        state_path,
+        "personal".to_string(),
+        "447700900000".to_string(),
+        "http://bridge/webhooks/openwa".to_string(),
+        "secret".to_string(),
+        "447700900000@c.us".to_string(),
+        3_500,
+        1_500,
+        20,
+        100,
+        24,
+        command_catalog,
+        command_catalog_path,
+        ready,
+        true,
+        true,
+    );
+    let task = tokio::spawn(coordinator.run(command_rx));
+    let (accepted, accepted_rx) = tokio::sync::oneshot::channel();
+    commands
+        .send(CoordinatorCommand::Inbound {
+            message: InboundMessage {
+                idempotency_key: "event-help".to_string(),
+                message_id: "message-help".to_string(),
+                chat_id: "447700900000@c.us".to_string(),
+                body: "/help".to_string(),
+            },
+            accepted,
+        })
+        .await
+        .unwrap();
+    assert!(accepted_rx.await.unwrap());
+    let (status, status_rx) = tokio::sync::oneshot::channel();
+    commands
+        .send(CoordinatorCommand::Status(status))
+        .await
+        .unwrap();
+    let _ = status_rx.await.unwrap();
+    let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+    commands
+        .send(CoordinatorCommand::Shutdown(shutdown))
+        .await
+        .unwrap();
+    shutdown_rx.await.unwrap();
+    task.await.unwrap();
+
+    assert_eq!(
+        *sent.lock().unwrap(),
+        vec![
+            "[remote] My commands\n\nSession\n• `/status` — show status\n\nConfigured on disk."
+                .to_string()
+        ]
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn app_server_retries_notify_once_for_a_queued_prompt() {
     let directory = tempdir().unwrap();
@@ -201,6 +289,8 @@ async fn app_server_retries_notify_once_for_a_queued_prompt() {
     let sent = Arc::clone(&openwa.sent);
     let ready = Arc::new(AtomicBool::new(true));
     let (commands, command_rx) = mpsc::channel(8);
+    let (command_catalog, command_catalog_path) =
+        CommandCatalog::load_or_create(directory.path()).unwrap();
     let coordinator = Coordinator::new(
         codex,
         openwa,
@@ -216,6 +306,8 @@ async fn app_server_retries_notify_once_for_a_queued_prompt() {
         20,
         100,
         24,
+        command_catalog,
+        command_catalog_path,
         ready,
         true,
         true,

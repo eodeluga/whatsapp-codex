@@ -8,6 +8,7 @@ fn plain_messages_are_prompts_and_standard_controls_are_recognized() {
         BridgeCommand::Prompt("inspect the current project".to_string())
     );
     assert_eq!(parse_command("/status"), BridgeCommand::Status);
+    assert_eq!(parse_command("/"), BridgeCommand::Help);
     assert_eq!(
         parse_command("/approve abc"),
         BridgeCommand::Approve {
