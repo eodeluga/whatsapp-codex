@@ -19,7 +19,7 @@ fn completed_items_preserve_arrival_order_and_replace_deltas() {
 }
 
 #[test]
-fn labels_fit_within_the_openwa_limit() {
+fn labels_fit_within_the_transport_limit() {
     let output = "x".repeat(8_500);
     let chunks = labelled_chunks(&output, 4_000);
 

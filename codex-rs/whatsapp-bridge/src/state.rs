@@ -32,7 +32,6 @@ pub struct BridgeState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ThreadBinding {
-    pub openwa_session_id: String,
     pub self_chat_id: String,
     pub codex_thread_id: String,
 }

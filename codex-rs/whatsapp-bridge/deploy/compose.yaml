@@ -1,61 +1,32 @@
 services:
-  openwa:
-    image: ${OPENWA_IMAGE:-openwa:82b2499dc13a}
+  baileys-gateway:
     build:
-      context: https://github.com/rmyndharis/OpenWA.git#82b2499dc13a93af922330e2be432174bf0e38a4
-    environment:
-      ENGINE_TYPE: whatsapp-web.js
-      SSRF_ALLOWED_HOSTS: codex-whatsapp-bridge
-    ports:
-      - "127.0.0.1:2785:2785"
+      context: ../..
+      dockerfile: whatsapp-bridge/baileys-gateway/Dockerfile
     volumes:
-      - openwa-data:/app/data
-    networks: [bridge, openwa-egress]
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://127.0.0.1:2785/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
+      - ${CODEX_HOME:-${HOME}/.codex}/whatsapp:/codex-home/whatsapp:ro
+      - baileys-auth:/data/auth
+    networks: [bridge, transport-egress]
 
   codex-whatsapp-bridge:
     image: ${CODEX_WHATSAPP_BRIDGE_IMAGE:-codex-whatsapp-bridge:local}
     build:
       context: ../..
       dockerfile: whatsapp-bridge/deploy/Dockerfile
-    environment:
-      CODEX_BRIDGE_UID: "${UID:-1000}"
-      CODEX_BRIDGE_GID: "${GID:-1000}"
     command: ["--config", "/codex-home/config.toml"]
     volumes:
       - ${CODEX_HOME:-${HOME}/.codex}/config.toml:/codex-home/config.toml:ro
       - ${CODEX_HOME:-${HOME}/.codex}/whatsapp:/codex-home/whatsapp
       - ${CODEX_HOME:-${HOME}/.codex}/app-server-control:/codex-home/app-server-control
-      - openwa-data:/openwa-data:ro
     networks: [bridge, host-access]
-    ports:
-      - "127.0.0.1:8787:8787"
-    depends_on:
-      openwa:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "codex-whatsapp-bridge", "--healthcheck"]
-      interval: 10s
-      timeout: 5s
-      retries: 6
-    stop_grace_period: 20s
+    ports: ["127.0.0.1:8787:8787"]
+    depends_on: [baileys-gateway]
 
 networks:
   bridge:
     internal: true
   host-access:
-  openwa-egress:
+  transport-egress:
 
 volumes:
-  openwa-data:
+  baileys-auth:

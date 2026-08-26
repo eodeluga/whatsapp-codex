@@ -28,11 +28,11 @@ async fn verifies_raw_body_and_filters_a_self_chat_message() {
 
 #[tokio::test]
 async fn rejects_a_sent_message_to_another_chat() {
-    let webhook = OpenWaWebhook {
+    let webhook = TransportWebhook {
         event: "message.sent".to_string(),
         session_id: "s".to_string(),
         idempotency_key: None,
-        data: serde_json::to_value(OpenWaMessage {
+        data: serde_json::to_value(TransportMessage {
             id: "m".to_string(),
             from: "447700900000@c.us".to_string(),
             to: "447700900001@c.us".to_string(),
@@ -60,11 +60,11 @@ async fn rejects_a_sent_message_to_another_chat() {
 
 #[tokio::test]
 async fn rejects_a_message_already_recorded_in_the_outbound_ledger() {
-    let webhook = OpenWaWebhook {
+    let webhook = TransportWebhook {
         event: "message.sent".to_string(),
         session_id: "s".to_string(),
         idempotency_key: Some("key".to_string()),
-        data: serde_json::to_value(OpenWaMessage {
+        data: serde_json::to_value(TransportMessage {
             id: "bridge-message".to_string(),
             from: "447700900000@c.us".to_string(),
             to: "447700900000@c.us".to_string(),
@@ -118,11 +118,11 @@ async fn safely_ignores_a_signed_session_status_event() {
 
 #[tokio::test]
 async fn accepts_a_modern_self_chat_message_after_resolving_its_lid() {
-    let webhook = OpenWaWebhook {
+    let webhook = TransportWebhook {
         event: "message.sent".to_string(),
         session_id: "s".to_string(),
         idempotency_key: Some("key".to_string()),
-        data: serde_json::to_value(OpenWaMessage {
+        data: serde_json::to_value(TransportMessage {
             id: "m".to_string(),
             from: "447700900000@c.us".to_string(),
             to: "172662718488742@lid".to_string(),
@@ -158,11 +158,11 @@ async fn accepts_a_modern_self_chat_message_after_resolving_its_lid() {
 
 #[tokio::test]
 async fn rejects_a_lid_that_resolves_to_another_phone() {
-    let webhook = OpenWaWebhook {
+    let webhook = TransportWebhook {
         event: "message.sent".to_string(),
         session_id: "s".to_string(),
         idempotency_key: None,
-        data: serde_json::to_value(OpenWaMessage {
+        data: serde_json::to_value(TransportMessage {
             id: "m".to_string(),
             from: "447700900000@c.us".to_string(),
             to: "172662718488742@lid".to_string(),

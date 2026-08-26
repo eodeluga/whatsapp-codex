@@ -8,8 +8,8 @@ use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
-async fn client(server: &MockServer) -> HttpOpenWaClient {
-    HttpOpenWaClient::with_timeout(
+async fn client(server: &MockServer) -> HttpTransportClient {
+    HttpTransportClient::with_timeout(
         format!("{}/api", server.uri()),
         "personal".to_string(),
         "operator-key".to_string(),
@@ -210,7 +210,7 @@ async fn edits_text_using_the_documented_request_shape() {
 #[tokio::test]
 async fn updates_an_existing_webhook_instead_of_creating_duplicates() {
     let server = MockServer::start().await;
-    let webhook_url = "http://bridge/webhooks/openwa";
+    let webhook_url = "http://bridge/webhooks/transport";
     Mock::given(method("GET"))
         .and(path("/api/sessions/personal/webhooks"))
         .and(header("X-API-Key", "operator-key"))
@@ -250,9 +250,9 @@ async fn updates_an_existing_webhook_instead_of_creating_duplicates() {
 #[tokio::test]
 async fn maps_auth_rate_limit_server_and_malformed_responses() {
     for (status, expected) in [
-        (401, OpenWaError::Unauthorized),
-        (429, OpenWaError::RateLimited),
-        (500, OpenWaError::Server),
+        (401, TransportError::Unauthorized),
+        (429, TransportError::RateLimited),
+        (500, TransportError::Server),
     ] {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -280,7 +280,7 @@ async fn maps_auth_rate_limit_server_and_malformed_responses() {
             .await
             .send_text("chat".to_string(), "text".to_string())
             .await,
-        Err(OpenWaError::InvalidResponse)
+        Err(TransportError::InvalidResponse)
     ));
 }
 
@@ -301,6 +301,6 @@ async fn times_out_slow_requests() {
             .await
             .send_text("chat".to_string(), "text".to_string())
             .await,
-        Err(OpenWaError::Transport)
+        Err(TransportError::Transport)
     ));
 }

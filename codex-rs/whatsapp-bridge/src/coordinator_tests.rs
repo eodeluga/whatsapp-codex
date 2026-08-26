@@ -2,8 +2,8 @@ use super::*;
 use crate::codex::CodexClient;
 use crate::codex::CodexError;
 use crate::codex::ThreadSummary;
-use crate::openwa::OpenWaError;
-use crate::openwa::OpenWaSession;
+use crate::transport::TransportError;
+use crate::transport::TransportStatus;
 use codex_app_server_protocol::ThreadResumeResponse;
 use std::sync::Mutex;
 use tempfile::tempdir;
@@ -74,23 +74,19 @@ impl CodexClient for FakeCodex {
 }
 
 #[derive(Clone, Default)]
-struct FakeOpenWa {
+struct FakeTransport {
     sent: Arc<Mutex<Vec<String>>>,
 }
 
-impl OpenWaClient for FakeOpenWa {
-    async fn session_status(&self) -> Result<OpenWaSession, OpenWaError> {
-        Ok(OpenWaSession {
+impl TransportClient for FakeTransport {
+    async fn status(&self) -> Result<TransportStatus, TransportError> {
+        Ok(TransportStatus {
             status: "ready".to_string(),
-            phone: Some("447700900000".to_string()),
+            account: Some("447700900000".to_string()),
         })
     }
 
-    async fn start_session(&self) -> Result<(), OpenWaError> {
-        Ok(())
-    }
-
-    async fn send_text(&self, _chat_id: String, text: String) -> Result<String, OpenWaError> {
+    async fn send_text(&self, _chat_id: String, text: String) -> Result<String, TransportError> {
         let mut sent = self.sent.lock().unwrap();
         sent.push(text);
         Ok(format!("wa-{}", sent.len()))
@@ -101,19 +97,11 @@ impl OpenWaClient for FakeOpenWa {
         _chat_id: String,
         _message_id: String,
         _text: String,
-    ) -> Result<(), OpenWaError> {
+    ) -> Result<(), TransportError> {
         Ok(())
     }
 
-    async fn register_webhook(&self, _url: String, _secret: String) -> Result<(), OpenWaError> {
-        Ok(())
-    }
-
-    async fn pairing_qr(&self) -> Result<serde_json::Value, OpenWaError> {
-        Ok(serde_json::Value::Null)
-    }
-
-    async fn resolve_phone(&self, _contact_id: String) -> Result<Option<String>, OpenWaError> {
+    async fn pairing_qr(&self) -> Result<Option<String>, TransportError> {
         Ok(None)
     }
 }
@@ -130,13 +118,10 @@ async fn durable_deduplication_starts_one_turn_for_a_replayed_webhook() {
         CommandCatalog::load_or_create(directory.path()).unwrap();
     let coordinator = Coordinator::new(
         codex,
-        FakeOpenWa::default(),
+        FakeTransport::default(),
         BridgeState::empty(),
         state_path.clone(),
-        "personal".to_string(),
         "447700900000".to_string(),
-        "http://bridge/webhooks/openwa".to_string(),
-        "secret".to_string(),
         "447700900000@c.us".to_string(),
         3_500,
         1_500,
@@ -200,8 +185,8 @@ async fn help_reloads_the_user_command_catalog() {
     let directory = tempdir().unwrap();
     let state_path = directory.path().join("state.json");
     let codex = FakeCodex::default();
-    let openwa = FakeOpenWa::default();
-    let sent = Arc::clone(&openwa.sent);
+    let transport = FakeTransport::default();
+    let sent = Arc::clone(&transport.sent);
     let ready = Arc::new(AtomicBool::new(true));
     let (commands, command_rx) = mpsc::channel(8);
     let (command_catalog, command_catalog_path) =
@@ -222,13 +207,10 @@ async fn help_reloads_the_user_command_catalog() {
     .unwrap();
     let coordinator = Coordinator::new(
         codex,
-        openwa,
+        transport,
         BridgeState::empty(),
         state_path,
-        "personal".to_string(),
         "447700900000".to_string(),
-        "http://bridge/webhooks/openwa".to_string(),
-        "secret".to_string(),
         "447700900000@c.us".to_string(),
         3_500,
         1_500,
@@ -285,21 +267,18 @@ async fn app_server_retries_notify_once_for_a_queued_prompt() {
     let state_path = directory.path().join("state.json");
     let codex = FakeCodex::default();
     codex.start_thread_fails.store(true, Ordering::Release);
-    let openwa = FakeOpenWa::default();
-    let sent = Arc::clone(&openwa.sent);
+    let transport = FakeTransport::default();
+    let sent = Arc::clone(&transport.sent);
     let ready = Arc::new(AtomicBool::new(true));
     let (commands, command_rx) = mpsc::channel(8);
     let (command_catalog, command_catalog_path) =
         CommandCatalog::load_or_create(directory.path()).unwrap();
     let coordinator = Coordinator::new(
         codex,
-        openwa,
+        transport,
         BridgeState::empty(),
         state_path.clone(),
-        "personal".to_string(),
         "447700900000".to_string(),
-        "http://bridge/webhooks/openwa".to_string(),
-        "secret".to_string(),
         "447700900000@c.us".to_string(),
         3_500,
         1_500,

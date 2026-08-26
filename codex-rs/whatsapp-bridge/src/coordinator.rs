@@ -5,15 +5,14 @@ use crate::codex::CodexClient;
 use crate::codex::CodexError;
 use crate::commands::BridgeCommand;
 use crate::commands::parse_command;
-use crate::openwa::OpenWaClient;
-use crate::openwa::session_needs_start;
 use crate::output::OutputAggregator;
 use crate::output::labelled_chunks;
 use crate::state::BridgeState;
 use crate::state::OutboundMessage;
 use crate::state::QueuedPrompt;
 use crate::state::unix_timestamp;
-use crate::webhook::InboundMessage;
+use crate::transport::TransportClient;
+use crate::transport_webhook::InboundMessage;
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_protocol::CommandExecutionApprovalDecision;
 use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
@@ -107,13 +106,10 @@ impl PendingRequest {
 
 pub struct Coordinator<C, O> {
     codex: C,
-    openwa: O,
+    transport: O,
     state: BridgeState,
     state_path: PathBuf,
-    openwa_session_id: String,
     configured_phone: String,
-    webhook_url: String,
-    webhook_secret: String,
     self_chat_id: String,
     output_chunk_chars: usize,
     edit_interval: std::time::Duration,
@@ -127,8 +123,7 @@ pub struct Coordinator<C, O> {
     pending_requests: HashMap<String, PendingRequest>,
     state_healthy: bool,
     app_server_connected: bool,
-    openwa_healthy: bool,
-    webhook_registered: bool,
+    transport_healthy: bool,
     ready: Arc<AtomicBool>,
     stream_degraded: bool,
     last_edit_at: Option<tokio::time::Instant>,
@@ -136,17 +131,14 @@ pub struct Coordinator<C, O> {
     resume_failures: u8,
 }
 
-impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
+impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         codex: C,
-        openwa: O,
+        transport: O,
         state: BridgeState,
         state_path: PathBuf,
-        openwa_session_id: String,
         configured_phone: String,
-        webhook_url: String,
-        webhook_secret: String,
         self_chat_id: String,
         output_chunk_chars: usize,
         edit_interval_ms: u64,
@@ -157,17 +149,14 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
         command_catalog_path: PathBuf,
         ready: Arc<AtomicBool>,
         app_server_connected: bool,
-        openwa_healthy: bool,
+        transport_healthy: bool,
     ) -> Self {
         Self {
             codex,
-            openwa,
+            transport,
             state,
             state_path,
-            openwa_session_id,
             configured_phone,
-            webhook_url,
-            webhook_secret,
             self_chat_id,
             output_chunk_chars,
             edit_interval: std::time::Duration::from_millis(edit_interval_ms),
@@ -181,8 +170,7 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
             pending_requests: HashMap::new(),
             state_healthy: true,
             app_server_connected,
-            openwa_healthy,
-            webhook_registered: openwa_healthy,
+            transport_healthy,
             ready,
             stream_degraded: false,
             last_edit_at: None,
@@ -225,10 +213,10 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
         let mut recover_state = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut expire_approvals = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut reconcile_turn_start = tokio::time::interval(std::time::Duration::from_secs(5));
-        let openwa_check_interval = std::time::Duration::from_secs(30);
-        let mut check_openwa = tokio::time::interval_at(
-            tokio::time::Instant::now() + openwa_check_interval,
-            openwa_check_interval,
+        let transport_check_interval = std::time::Duration::from_secs(30);
+        let mut check_transport = tokio::time::interval_at(
+            tokio::time::Instant::now() + transport_check_interval,
+            transport_check_interval,
         );
         let mut connected = self.app_server_connected;
         let mut reconnect_delay = std::time::Duration::from_secs(1);
@@ -271,7 +259,7 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
                     _ = reconcile_turn_start.tick(), if self.has_uncertain_turn_start() => {
                         self.reconcile_uncertain_turn_start().await;
                     },
-                    _ = check_openwa.tick() => self.check_openwa().await,
+                    _ = check_transport.tick() => self.check_transport().await,
                     else => break,
                 }
             } else {
@@ -303,7 +291,7 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
                     _ = recover_state.tick(), if !self.state_healthy => {
                         self.recover_state_storage();
                     },
-                    _ = check_openwa.tick() => self.check_openwa().await,
+                    _ = check_transport.tick() => self.check_transport().await,
                     else => break,
                 }
             }
@@ -311,33 +299,19 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
         self.ready.store(false, Ordering::Release);
     }
 
-    async fn check_openwa(&mut self) {
-        let should_register_webhook = !self.webhook_registered;
-        let healthy = match self.openwa.session_status().await {
+    async fn check_transport(&mut self) {
+        let healthy = match self.transport.status().await {
             Ok(session) => {
-                if session_needs_start(&session.status) {
-                    let _ = self.openwa.start_session().await;
-                }
                 let session_ready = session.status.eq_ignore_ascii_case("ready")
                     && session
-                        .phone
+                        .account
                         .as_deref()
                         .is_none_or(|phone| normalize_phone(phone) == self.configured_phone);
-                if session_ready
-                    && should_register_webhook
-                    && self
-                        .openwa
-                        .register_webhook(self.webhook_url.clone(), self.webhook_secret.clone())
-                        .await
-                        .is_ok()
-                {
-                    self.webhook_registered = true;
-                }
-                session_ready && self.webhook_registered
+                session_ready
             }
             Err(_) => false,
         };
-        self.openwa_healthy = healthy;
+        self.transport_healthy = healthy;
         self.refresh_readiness();
         if healthy && !self.state.outbox.is_empty() {
             let _ = self.flush_outbox().await;
@@ -836,7 +810,6 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
     fn bind_thread(&mut self, thread_id: String) -> bool {
         let previous_binding = self.state.binding.clone();
         self.state.binding = Some(crate::state::ThreadBinding {
-            openwa_session_id: self.openwa_session_id.clone(),
             self_chat_id: self.self_chat_id.clone(),
             codex_thread_id: thread_id,
         });
@@ -1020,7 +993,7 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
         };
         self.last_edit_at = Some(tokio::time::Instant::now());
         if self
-            .openwa
+            .transport
             .edit_text(self.self_chat_id.clone(), message_id, chunk)
             .await
             .is_err()
@@ -1062,7 +1035,7 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
             return;
         };
         let edited = if let Some(message_id) = working_message_id {
-            self.openwa
+            self.transport
                 .edit_text(self.self_chat_id.clone(), message_id, first.clone())
                 .await
                 .is_ok()
@@ -1480,7 +1453,7 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
     async fn send_tracked(&mut self, text: &str) -> Option<String> {
         if !self.state_healthy || self.state.outbox.len() >= MAX_OUTBOX_MESSAGES {
             if self.state.outbox.len() >= MAX_OUTBOX_MESSAGES {
-                self.openwa_healthy = false;
+                self.transport_healthy = false;
                 self.refresh_readiness();
             }
             return None;
@@ -1506,7 +1479,11 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
         let mut delivered = HashMap::new();
         let mut delivered_any = false;
         while let Some(message) = self.state.outbox.first().cloned() {
-            match self.openwa.send_text(message.chat_id, message.body).await {
+            match self
+                .transport
+                .send_text(message.chat_id, message.body)
+                .await
+            {
                 Ok(message_id) => {
                     delivered_any = true;
                     self.state.outbox.remove(0);
@@ -1525,7 +1502,7 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
                     }
                 }
                 Err(_) => {
-                    self.openwa_healthy = false;
+                    self.transport_healthy = false;
                     self.refresh_readiness();
                     if let Some(queued) = self.state.outbox.first_mut() {
                         queued.attempts = queued.attempts.saturating_add(1);
@@ -1539,7 +1516,7 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
             }
         }
         if delivered_any {
-            self.openwa_healthy = true;
+            self.transport_healthy = true;
             self.refresh_readiness();
         }
         delivered
@@ -1554,10 +1531,7 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
 
     fn refresh_readiness(&self) {
         self.ready.store(
-            self.state_healthy
-                && self.app_server_connected
-                && self.openwa_healthy
-                && self.webhook_registered,
+            self.state_healthy && self.app_server_connected && self.transport_healthy,
             Ordering::Release,
         );
     }
@@ -1584,13 +1558,13 @@ impl<C: CodexClient, O: OpenWaClient> Coordinator<C, O> {
                     PendingRequest::Permissions { .. } => "permission approval",
                 });
         format!(
-            "[codex] app-server: {}; OpenWA: {}; state: {}; thread: {thread}; active turn: {active_turn}; queued: {}; pending: {pending}",
+            "[codex] app-server: {}; transport: {}; state: {}; thread: {thread}; active turn: {active_turn}; queued: {}; pending: {pending}",
             if self.app_server_connected {
                 "connected"
             } else {
                 "disconnected"
             },
-            if self.openwa_healthy && self.webhook_registered {
+            if self.transport_healthy {
                 "ready"
             } else {
                 "degraded"

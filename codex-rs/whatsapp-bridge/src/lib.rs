@@ -3,10 +3,10 @@
 pub mod codex;
 pub mod commands;
 pub mod coordinator;
-pub mod openwa;
 pub mod output;
 pub mod state;
-pub mod webhook;
+pub mod transport;
+pub mod transport_webhook;
 
 mod command_catalog;
 

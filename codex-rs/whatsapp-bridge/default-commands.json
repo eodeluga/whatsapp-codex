@@ -10,7 +10,7 @@
         { "usage": "/", "description": "show this command catalogue" },
         { "usage": "/help", "description": "show this command catalogue" },
         { "usage": "/new", "description": "start and select a new Codex thread" },
-        { "usage": "/status", "description": "show bridge, OpenWA, thread, turn, queue, and approval status" },
+        { "usage": "/status", "description": "show bridge, Baileys transport, thread, turn, queue, and approval status" },
         { "usage": "/stop", "description": "interrupt the active Codex turn" },
         { "usage": "/approve <token>", "description": "approve a pending request" },
         { "usage": "/approve-session <token>", "description": "approve a pending permission request for the session when supported" },
