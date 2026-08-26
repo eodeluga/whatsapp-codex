@@ -30,7 +30,7 @@ const connect = async () => {
   socket.ev.on("creds.update", saveCreds);
   socket.ev.on("connection.update", async (update) => {
     if (update.qr) { qrCode = await QRCode.toDataURL(update.qr); status = "pairing"; }
-    if (update.connection === "open") { account = socket.user?.id?.split("@")[0]; qrCode = undefined; status = "ready"; }
+    if (update.connection === "open") { account = socket.user?.id?.split("@")[0]?.split(":")[0]; qrCode = undefined; status = "ready"; }
     if (update.connection === "close") { const code = update.lastDisconnect?.error?.output?.statusCode; status = code === DisconnectReason.loggedOut ? "logged_out" : "disconnected"; if (code !== DisconnectReason.loggedOut) setTimeout(() => void connect(), 2000); }
   });
   socket.ev.on("messages.upsert", async ({ messages, type }) => { if (type === "notify") for (const message of messages) if (message.key.id && message.key.remoteJid && message.message) await deliver(message); });
