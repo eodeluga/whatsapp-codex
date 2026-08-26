@@ -12,7 +12,7 @@ For the complete source installation and user quickstart, see the repository
 
 The supplied Compose deployment runs two services:
 
-- `openwa` maintains the linked WhatsApp session and delivers signed webhooks;
+- `baileys-gateway` maintains the linked WhatsApp session and delivers signed webhooks;
 - `codex-whatsapp-bridge` validates the self-chat, deduplicates events, and
   speaks Codex's typed app-server protocol over a bind-mounted Unix socket.
 
@@ -22,7 +22,7 @@ needs the host workspace mounted.
 
 The bridge reads the user-owned `[whatsapp]` table from Codex's normal
 `config.toml` and private generated state from
-`CODEX_HOME/whatsapp/runtime.json`. Users must not create OpenWA credentials,
+`CODEX_HOME/whatsapp/runtime.json`. Users must not create Baileys transport credentials,
 session IDs, API keys, webhook URLs, or signing secrets manually.
 
 On first start, the bridge also creates the user-editable command catalogue at
@@ -42,7 +42,7 @@ docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml up -d --build
 ```
 
 Then open [http://127.0.0.1:8787/pairing](http://127.0.0.1:8787/pairing).
-The page shows an auto-refreshing QR code until OpenWA is paired, then confirms
+The page shows an auto-refreshing QR code until Baileys transport is paired, then confirms
 that pairing is complete.
 
 The deployment publishes only loopback management endpoints:
@@ -50,9 +50,9 @@ The deployment publishes only loopback management endpoints:
 - `http://127.0.0.1:8787/pairing` — pairing and completion page;
 - `http://127.0.0.1:8787/health/live` — bridge process liveness;
 - `http://127.0.0.1:8787/health/ready` — complete integration readiness;
-- `http://127.0.0.1:2785` — OpenWA's loopback interface.
+- `http://internal Baileys gateway` — Baileys transport's loopback interface.
 
-OpenWA and the bridge also share an internal Docker network for webhook and
+Baileys transport and the bridge also share an internal Docker network for webhook and
 REST traffic. The host app-server is not exposed on a TCP network interface.
 
 ## Operate the deployment
@@ -60,12 +60,12 @@ REST traffic. The host app-server is not exposed on a TCP network interface.
 ```shell
 docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml ps
 docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml logs -f \
-  codex-whatsapp-bridge openwa
+  codex-whatsapp-bridge baileys-gateway
 docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml restart
 ```
 
-Container restarts preserve the named `openwa-data` volume and the bridge state
-under `CODEX_HOME/whatsapp/`. Persisted inactive OpenWA sessions are restarted
+Container restarts preserve the named `baileys-auth` volume and the bridge state
+under `CODEX_HOME/whatsapp/`. Persisted inactive Baileys transport sessions are restarted
 automatically. Do not remove the volume unless deliberately resetting the
 linked WhatsApp session.
 
@@ -104,5 +104,5 @@ just fmt
 just test -p codex-whatsapp-bridge
 ```
 
-The bridge test suite covers webhook signatures and filtering, OpenWA request
+The bridge test suite covers webhook signatures and filtering, Baileys transport request
 shapes, durable event deduplication, and bounded app-server outage reporting.

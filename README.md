@@ -6,7 +6,7 @@ threads, history, tools, sandboxing, and approval flow. The gateway does not
 create a separate agent, workspace, or conversation model.
 
 This repository currently provides a source-build installation. Codex runs on
-the host, while the supplied Docker Compose deployment runs OpenWA and the
+the host, while the supplied Docker Compose deployment runs Baileys transport and the
 small WhatsApp bridge.
 
 ## Prerequisites
@@ -62,10 +62,10 @@ docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml up -d --build
 
 The first build can take several minutes. Compose builds and starts:
 
-- OpenWA, which owns the linked WhatsApp session; and
-- `codex-whatsapp-bridge`, which connects OpenWA to the host Codex app-server.
+- Baileys transport, which owns the linked WhatsApp session; and
+- `codex-whatsapp-bridge`, which connects Baileys transport to the host Codex app-server.
 
-OpenWA credentials, its session ID, webhook settings, and signing secrets are
+Baileys credentials and internal transport settings are
 created and stored internally. Do not enter them manually.
 
 ### 4. Pair WhatsApp
@@ -79,7 +79,7 @@ code. The page refreshes while pairing and then displays:
 ### 5. Verify the connection
 
 Send `/status` in your WhatsApp self-chat. A ready installation reports the
-Codex app-server as connected and OpenWA as healthy. Any other plain text, such
+Codex app-server as connected and Baileys transport as healthy. Any other plain text, such
 as `Summarise the current project`, starts a normal Codex turn.
 
 The terminal and WhatsApp use the same normal Codex history. WhatsApp also
@@ -103,7 +103,7 @@ account_phone_number = "+447700900000"
 ```
 
 Private runtime data is stored under `~/.codex/whatsapp/`. There is no
-WhatsApp-specific workspace, required input prefix, OpenWA API key, webhook
+WhatsApp-specific workspace, required input prefix, transport API token, webhook
 URL, or Docker environment variable to configure.
 
 The gateway creates a user-editable command and display catalogue at
@@ -125,26 +125,26 @@ curl --fail http://127.0.0.1:8787/health/ready
 ```
 
 `health/live` confirms that the bridge process is running. `health/ready`
-returns success only when durable state, OpenWA, its webhook, and the Codex
+returns success only when durable state, the Baileys transport, and the Codex
 app-server are all available.
 
 Follow gateway logs with:
 
 ```shell
 docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml logs -f \
-  codex-whatsapp-bridge openwa
+  codex-whatsapp-bridge baileys-gateway
 ```
 
-Restarting the containers preserves OpenWA and bridge state:
+Restarting the containers preserves Baileys transport and bridge state:
 
 ```shell
 docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml restart
 ```
 
-The bridge automatically restarts a persisted OpenWA session. You normally do
-not need to pair again. If the pairing page presents a new QR code, OpenWA no
+The bridge automatically reconnects to the persisted Baileys transport. You normally do
+not need to pair again. If the pairing page presents a new QR code, Baileys transport no
 longer has an authenticated session and must be linked again. Do not delete the
-`openwa-data` volume during routine restart or upgrade work.
+`baileys-auth` volume during routine restart or upgrade work.
 
 After changing only bridge source, rebuild and recreate only that service:
 
@@ -165,8 +165,8 @@ recreated, repeat the bridge-only `up -d --no-deps --force-recreate` command.
 
 ### The pairing page returns 503
 
-OpenWA may still be starting or restoring its persisted session. Check the
-logs and wait for `qr_ready` or `ready`. The bridge automatically requests a
+Baileys transport may still be starting or restoring its persisted session. Check the
+logs and wait for `pairing` or `ready`. The bridge automatically requests a
 restart for persisted `disconnected`, `stopped`, or failed sessions.
 
 ### WhatsApp reports that the app-server is unavailable
