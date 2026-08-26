@@ -122,7 +122,7 @@ fn project_layers_cannot_define_whatsapp() {
 #[test]
 fn config_layer_debug_redacts_whatsapp_secrets_and_raw_toml() {
     let raw = r#"
-[whatsapp.openwa]
+[whatsapp.baileys]
 api_key = "operator-secret"
 webhook_signing_secret = "webhook-secret"
 "#;

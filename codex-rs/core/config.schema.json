@@ -2257,28 +2257,6 @@
         }
       ]
     },
-    "OpenWaConfigToml": {
-      "additionalProperties": false,
-      "description": "OpenWA connection and webhook settings.",
-      "properties": {
-        "api_base_url": {
-          "type": "string"
-        },
-        "api_key": {
-          "type": "string"
-        },
-        "session_id": {
-          "type": "string"
-        },
-        "webhook_signing_secret": {
-          "type": "string"
-        },
-        "webhook_url": {
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
     "OrchestratorFeatureToml": {
       "additionalProperties": false,
       "description": "Settings for a feature owned by the orchestrator.",
@@ -4791,61 +4769,12 @@
       },
       "type": "object"
     },
-    "WhatsAppBridgeConfigToml": {
-      "additionalProperties": false,
-      "description": "Local bridge runtime settings.",
-      "properties": {
-        "allow_tcp_app_server": {
-          "default": false,
-          "description": "Opt in to a TCP app-server endpoint for advanced deployments.",
-          "type": "boolean"
-        },
-        "app_server_endpoint": {
-          "type": "string"
-        },
-        "dedupe_capacity": {
-          "format": "uint",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "dedupe_ttl_hours": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "edit_interval_ms": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "listen": {
-          "type": "string"
-        },
-        "max_queued_prompts": {
-          "format": "uint",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "output_chunk_chars": {
-          "format": "uint",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "state_path": {
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
     "WhatsAppConfigToml": {
       "additionalProperties": false,
-      "description": "Top-level `[whatsapp]` settings stored exclusively in the base user config.",
+      "description": "Top-level `[whatsapp]` settings stored in the base user configuration.",
       "properties": {
         "account_phone_number": {
           "type": "string"
-        },
-        "bridge": {
-          "$ref": "#/definitions/WhatsAppBridgeConfigToml"
         },
         "enabled": {
           "default": false,
@@ -4854,15 +4783,6 @@
         "onboarding_complete": {
           "default": false,
           "type": "boolean"
-        },
-        "openwa": {
-          "$ref": "#/definitions/OpenWaConfigToml"
-        },
-        "trigger_prefix": {
-          "type": "string"
-        },
-        "workspace": {
-          "type": "string"
         }
       },
       "type": "object"

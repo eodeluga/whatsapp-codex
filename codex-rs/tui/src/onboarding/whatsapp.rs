@@ -244,11 +244,10 @@ impl WhatsAppWidget {
 
     fn new_runtime_config(&self) -> WhatsAppRuntimeConfig {
         WhatsAppRuntimeConfig {
-            openwa_api_base_url: "http://openwa:2785/api".to_string(),
-            openwa_session_id: format!("codex-{}", random_secret()),
-            openwa_api_key: random_secret(),
+            transport_base_url: "http://baileys-gateway:3000".to_string(),
+            transport_api_token: random_secret(),
             webhook_signing_secret: random_secret(),
-            webhook_url: "http://codex-whatsapp-bridge:8787/webhooks/openwa".to_string(),
+            webhook_url: "http://codex-whatsapp-bridge:8787/webhooks/transport".to_string(),
             bridge_listen: "0.0.0.0:8787".to_string(),
             state_path: PathBuf::from("/codex-home/whatsapp/state.json"),
             max_queued_prompts: 20,

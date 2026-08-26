@@ -29,9 +29,8 @@ pub struct WhatsAppConfigToml {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WhatsAppRuntimeConfig {
-    pub openwa_api_base_url: String,
-    pub openwa_session_id: String,
-    pub openwa_api_key: String,
+    pub transport_base_url: String,
+    pub transport_api_token: String,
     pub webhook_signing_secret: String,
     pub webhook_url: String,
     pub bridge_listen: String,
@@ -85,7 +84,7 @@ impl WhatsAppConfigToml {
             .ok_or(WhatsAppConfigError::Incomplete)?;
         let canonical =
             canonical_e164(phone_number).ok_or(WhatsAppConfigError::InvalidPhoneNumber)?;
-        Ok(format!("{}@c.us", &canonical[1..]))
+        Ok(format!("{}@s.whatsapp.net", &canonical[1..]))
     }
 
     /// Returns the user-owned configuration safe for config RPC responses.
