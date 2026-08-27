@@ -244,6 +244,7 @@ impl WhatsAppWidget {
 
     fn new_runtime_config(&self) -> WhatsAppRuntimeConfig {
         WhatsAppRuntimeConfig {
+            bridge_name: "WhatsApp".to_string(),
             transport_base_url: "http://baileys-gateway:3000".to_string(),
             transport_api_token: random_secret(),
             webhook_signing_secret: random_secret(),

@@ -3,6 +3,7 @@
 pub mod codex;
 pub mod commands;
 pub mod coordinator;
+pub mod health;
 pub mod output;
 pub mod state;
 pub mod transport;

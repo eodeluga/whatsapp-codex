@@ -38,12 +38,20 @@ fn state_file_is_private() {
 fn rejects_unknown_state_schema_and_unknown_fields() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("state.json");
-    std::fs::write(&path, r#"{"schemaVersion":2}"#).unwrap();
+    std::fs::write(
+        &path,
+        format!(r#"{{"schemaVersion":{}}}"#, STATE_SCHEMA_VERSION + 1),
+    )
+    .unwrap();
     assert!(matches!(
         BridgeState::load(&path),
         Err(StateError::UnsupportedSchema)
     ));
 
-    std::fs::write(&path, r#"{"schemaVersion":1,"unexpected":true}"#).unwrap();
+    std::fs::write(
+        &path,
+        format!(r#"{{"schemaVersion":{STATE_SCHEMA_VERSION},"unexpected":true}}"#),
+    )
+    .unwrap();
     assert!(matches!(BridgeState::load(&path), Err(StateError::Parse)));
 }

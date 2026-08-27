@@ -5,6 +5,8 @@ use crate::codex::CodexClient;
 use crate::codex::CodexError;
 use crate::commands::BridgeCommand;
 use crate::commands::parse_command;
+use crate::health::BridgeReadiness;
+use crate::health::BridgeReadinessSnapshot;
 use crate::output::OutputAggregator;
 use crate::output::labelled_chunks;
 use crate::state::BridgeState;
@@ -32,8 +34,6 @@ use codex_app_server_protocol::TurnStatus;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -44,6 +44,7 @@ const MAX_FILE_CHANGE_ITEMS: usize = 128;
 const MAX_FILE_CHANGE_PATHS: usize = 128;
 const MAX_FILE_CHANGE_PATH_CHARS: usize = 512;
 const APPROVAL_TIMEOUT_SECONDS: u64 = 300;
+const LOCAL_RECOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub enum CoordinatorCommand {
     Inbound {
@@ -124,7 +125,7 @@ pub struct Coordinator<C, O> {
     state_healthy: bool,
     app_server_connected: bool,
     transport_healthy: bool,
-    ready: Arc<AtomicBool>,
+    readiness: Arc<BridgeReadiness>,
     stream_degraded: bool,
     last_edit_at: Option<tokio::time::Instant>,
     live_edit_disabled: bool,
@@ -147,7 +148,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
         dedupe_ttl_hours: u64,
         command_catalog: CommandCatalog,
         command_catalog_path: PathBuf,
-        ready: Arc<AtomicBool>,
+        readiness: Arc<BridgeReadiness>,
         app_server_connected: bool,
         transport_healthy: bool,
     ) -> Self {
@@ -171,7 +172,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             state_healthy: true,
             app_server_connected,
             transport_healthy,
-            ready,
+            readiness,
             stream_degraded: false,
             last_edit_at: None,
             live_edit_disabled: false,
@@ -213,7 +214,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
         let mut recover_state = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut expire_approvals = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut reconcile_turn_start = tokio::time::interval(std::time::Duration::from_secs(5));
-        let transport_check_interval = std::time::Duration::from_secs(30);
+        let transport_check_interval = LOCAL_RECOVERY_INTERVAL;
         let mut check_transport = tokio::time::interval_at(
             tokio::time::Instant::now() + transport_check_interval,
             transport_check_interval,
@@ -270,19 +271,29 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                         }
                     },
                     _ = tokio::time::sleep(reconnect_delay_with_jitter(reconnect_delay)) => {
-                        if self.codex.reconnect().await.is_ok() && self.resume_after_reconnect().await {
-                            connected = true;
-                            self.app_server_connected = true;
-                            reconnect_delay = std::time::Duration::from_secs(1);
-                            self.refresh_readiness();
-                            if self.state.active_turn.is_none()
-                                && !self.state.queued_prompts.is_empty()
-                            {
-                                self.advance_queue().await;
+                        match self.codex.reconnect().await {
+                            Ok(()) if self.resume_after_reconnect().await => {
+                                connected = true;
+                                self.app_server_connected = true;
+                                reconnect_delay = std::time::Duration::from_secs(1);
+                                self.refresh_readiness();
+                                tracing::info!("connected to Codex app-server");
+                                if self.state.active_turn.is_none()
+                                    && !self.state.queued_prompts.is_empty()
+                                {
+                                    self.advance_queue().await;
+                                }
                             }
-                        } else {
-                            reconnect_delay =
-                                (reconnect_delay * 2).min(std::time::Duration::from_secs(30));
+                            Ok(()) => {
+                                tracing::warn!("connected to Codex app-server but thread resume failed");
+                                reconnect_delay =
+                                    (reconnect_delay * 2).min(LOCAL_RECOVERY_INTERVAL);
+                            }
+                            Err(error) => {
+                                tracing::debug!(%error, "Codex app-server reconnect attempt failed");
+                                reconnect_delay =
+                                    (reconnect_delay * 2).min(LOCAL_RECOVERY_INTERVAL);
+                            }
                         }
                     }
                     _ = retry_outbox.tick(), if !self.state.outbox.is_empty() => {
@@ -296,18 +307,17 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                 }
             }
         }
-        self.ready.store(false, Ordering::Release);
+        self.readiness.mark_stopped();
     }
 
     async fn check_transport(&mut self) {
         let healthy = match self.transport.status().await {
             Ok(session) => {
-                let session_ready = session.status.eq_ignore_ascii_case("ready")
+                session.status.eq_ignore_ascii_case("ready")
                     && session
                         .account
                         .as_deref()
-                        .is_none_or(|phone| normalize_phone(phone) == self.configured_phone);
-                session_ready
+                        .is_none_or(|phone| normalize_phone(phone) == self.configured_phone)
             }
             Err(_) => false,
         };
@@ -446,7 +456,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                 let _ =
                     tokio::time::timeout(std::time::Duration::from_secs(5), self.codex.shutdown())
                         .await;
-                self.ready.store(false, Ordering::Release);
+                self.readiness.mark_stopped();
                 let _ = done.send(());
                 return true;
             }
@@ -1530,10 +1540,12 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
     }
 
     fn refresh_readiness(&self) {
-        self.ready.store(
-            self.state_healthy && self.app_server_connected && self.transport_healthy,
-            Ordering::Release,
-        );
+        self.readiness.update(BridgeReadinessSnapshot {
+            ready: self.state_healthy && self.app_server_connected && self.transport_healthy,
+            state_healthy: self.state_healthy,
+            app_server_connected: self.app_server_connected,
+            transport_healthy: self.transport_healthy,
+        });
     }
 
     fn status_message(&self) -> String {

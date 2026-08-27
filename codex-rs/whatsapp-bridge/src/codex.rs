@@ -304,7 +304,10 @@ impl CodexClient for RemoteCodexClient {
     }
 
     async fn reconnect(&mut self) -> Result<(), CodexError> {
-        self.client = Some(connect_client(self.endpoint.clone()).await?);
+        let replacement = connect_client(self.endpoint.clone()).await?;
+        if let Some(previous) = self.client.replace(replacement) {
+            let _ = previous.shutdown().await;
+        }
         Ok(())
     }
 

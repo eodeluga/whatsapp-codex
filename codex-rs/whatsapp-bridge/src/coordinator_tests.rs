@@ -6,6 +6,8 @@ use crate::transport::TransportError;
 use crate::transport::TransportStatus;
 use codex_app_server_protocol::ThreadResumeResponse;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use tempfile::tempdir;
 
 #[derive(Clone, Default)]
@@ -112,7 +114,12 @@ async fn durable_deduplication_starts_one_turn_for_a_replayed_webhook() {
     let state_path = directory.path().join("state.json");
     let codex = FakeCodex::default();
     let recorded_turns = Arc::clone(&codex.turns);
-    let ready = Arc::new(AtomicBool::new(true));
+    let readiness = Arc::new(BridgeReadiness::new(BridgeReadinessSnapshot {
+        ready: true,
+        state_healthy: true,
+        app_server_connected: true,
+        transport_healthy: true,
+    }));
     let (commands, command_rx) = mpsc::channel(8);
     let (command_catalog, command_catalog_path) =
         CommandCatalog::load_or_create(directory.path()).unwrap();
@@ -130,7 +137,7 @@ async fn durable_deduplication_starts_one_turn_for_a_replayed_webhook() {
         24,
         command_catalog,
         command_catalog_path,
-        ready,
+        Arc::clone(&readiness),
         true,
         true,
     );
@@ -168,6 +175,15 @@ async fn durable_deduplication_starts_one_turn_for_a_replayed_webhook() {
     shutdown_rx.await.unwrap();
     task.await.unwrap();
 
+    assert_eq!(
+        readiness.snapshot(),
+        BridgeReadinessSnapshot {
+            ready: false,
+            state_healthy: true,
+            app_server_connected: false,
+            transport_healthy: true,
+        }
+    );
     assert_eq!(recorded_turns.lock().unwrap().len(), 1);
     let persisted = BridgeState::load(&state_path).unwrap();
     assert!(persisted.was_processed("event-1"));
@@ -187,7 +203,12 @@ async fn help_reloads_the_user_command_catalog() {
     let codex = FakeCodex::default();
     let transport = FakeTransport::default();
     let sent = Arc::clone(&transport.sent);
-    let ready = Arc::new(AtomicBool::new(true));
+    let readiness = Arc::new(BridgeReadiness::new(BridgeReadinessSnapshot {
+        ready: true,
+        state_healthy: true,
+        app_server_connected: true,
+        transport_healthy: true,
+    }));
     let (commands, command_rx) = mpsc::channel(8);
     let (command_catalog, command_catalog_path) =
         CommandCatalog::load_or_create(directory.path()).unwrap();
@@ -219,7 +240,7 @@ async fn help_reloads_the_user_command_catalog() {
         24,
         command_catalog,
         command_catalog_path,
-        ready,
+        readiness,
         true,
         true,
     );
@@ -269,7 +290,12 @@ async fn app_server_retries_notify_once_for_a_queued_prompt() {
     codex.start_thread_fails.store(true, Ordering::Release);
     let transport = FakeTransport::default();
     let sent = Arc::clone(&transport.sent);
-    let ready = Arc::new(AtomicBool::new(true));
+    let readiness = Arc::new(BridgeReadiness::new(BridgeReadinessSnapshot {
+        ready: true,
+        state_healthy: true,
+        app_server_connected: true,
+        transport_healthy: true,
+    }));
     let (commands, command_rx) = mpsc::channel(8);
     let (command_catalog, command_catalog_path) =
         CommandCatalog::load_or_create(directory.path()).unwrap();
@@ -287,7 +313,7 @@ async fn app_server_retries_notify_once_for_a_queued_prompt() {
         24,
         command_catalog,
         command_catalog_path,
-        ready,
+        readiness,
         true,
         true,
     );

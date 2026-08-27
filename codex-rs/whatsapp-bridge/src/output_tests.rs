@@ -35,11 +35,11 @@ fn caps_the_number_of_assistant_items_with_a_visible_notice() {
             "thread".into(),
             "turn".into(),
             format!("item-{index}"),
-            index.to_string(),
+            format!("value-{index};"),
         );
     }
 
     let completed = output.finish_turn("thread", "turn");
     assert!(completed.ends_with(TRUNCATION_NOTICE));
-    assert!(!completed.contains(&MAX_ASSISTANT_ITEMS_PER_TURN.to_string()));
+    assert!(!completed.contains(&format!("value-{MAX_ASSISTANT_ITEMS_PER_TURN};")));
 }

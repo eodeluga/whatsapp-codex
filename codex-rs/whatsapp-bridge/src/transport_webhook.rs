@@ -24,6 +24,8 @@ pub struct TransportMessage {
     pub from_me: bool,
     pub id: String,
     pub is_group: bool,
+    #[serde(default)]
+    pub is_self_chat: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,7 +64,7 @@ pub fn filter_inbound(
     if event.event != "message"
         || message.is_group
         || !message.from_me
-        || message.chat_id != self_chat_id
+        || (!message.is_self_chat && message.chat_id != self_chat_id)
         || message.body.is_empty()
         || outbound_message_ids(&message.id)
     {

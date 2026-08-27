@@ -29,6 +29,8 @@ pub struct WhatsAppConfigToml {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WhatsAppRuntimeConfig {
+    #[serde(default = "default_bridge_name")]
+    pub bridge_name: String,
     pub transport_base_url: String,
     pub transport_api_token: String,
     pub webhook_signing_secret: String,
@@ -40,6 +42,10 @@ pub struct WhatsAppRuntimeConfig {
     pub edit_interval_ms: u64,
     pub dedupe_capacity: usize,
     pub dedupe_ttl_hours: u64,
+}
+
+fn default_bridge_name() -> String {
+    "WhatsApp".to_string()
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
