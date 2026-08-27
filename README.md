@@ -126,7 +126,12 @@ curl --fail http://127.0.0.1:8787/health/ready
 
 `health/live` confirms that the bridge process is running. `health/ready`
 returns success only when durable state, the Baileys transport, and the Codex
-app-server are all available.
+app-server are all available. Its JSON response identifies each component, for
+example:
+
+```json
+{"ready":true,"stateHealthy":true,"appServerConnected":true,"transportHealthy":true}
+```
 
 Follow gateway logs with:
 
@@ -163,17 +168,29 @@ Run `docker compose ... ps` using the full Compose path shown above. The bridge
 must publish `127.0.0.1:8787->8787/tcp`. If it was interrupted while being
 recreated, repeat the bridge-only `up -d --no-deps --force-recreate` command.
 
-### The pairing page returns 503
+### The pairing page says the gateway is starting
 
 Baileys transport may still be starting or restoring its persisted session. Check the
-logs and wait for `pairing` or `ready`. The bridge automatically requests a
-restart for persisted `disconnected`, `stopped`, or failed sessions.
+logs and leave the page open; it refreshes automatically until pairing or the
+restored session is available.
 
 ### WhatsApp reports that the app-server is unavailable
 
-Ensure the compiled Codex TUI is still running. The bridge queues the prompt,
-sends one error notification for that outage, and retries silently. Repeated
-retries do not generate repeated WhatsApp errors.
+Start the compiled Codex TUI once. When WhatsApp is enabled, the TUI
+idempotently ensures a detached, pid-managed local app-server and waits for its
+protocol readiness before opening the normal chat UI. The app-server survives
+TUI exit and container restarts. The bridge queues prompts and reconnects
+automatically; repeated retries do not generate repeated WhatsApp errors.
+
+Inspect component readiness and the managed daemon with:
+
+```shell
+curl -sS http://127.0.0.1:8787/health/ready
+codex app-server daemon version
+```
+
+Managed app-server stderr is retained under
+`~/.codex/app-server-daemon/app-server.stderr.log` for startup diagnosis.
 
 ### Disk usage is unexpectedly large
 
