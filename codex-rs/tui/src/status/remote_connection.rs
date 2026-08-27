@@ -13,7 +13,14 @@ pub(crate) fn remote_connection_status_value(
     server_version: Option<&str>,
 ) -> Option<RemoteConnectionStatus> {
     let endpoint = match app_server_target {
-        AppServerTarget::Embedded => return None,
+        AppServerTarget::Embedded => {
+            return Some(RemoteConnectionStatus {
+                address: "local embedded".to_string(),
+                version: server_version
+                    .map(|version| format!("v{version}"))
+                    .unwrap_or_else(|| "unknown".to_string()),
+            });
+        }
         AppServerTarget::LocalDaemon { endpoint } | AppServerTarget::Remote { endpoint } => {
             endpoint
         }
@@ -51,7 +58,10 @@ mod tests {
     fn remote_connection_status_value_formats_display_value() -> color_eyre::Result<()> {
         assert_eq!(
             remote_connection_status_value(&AppServerTarget::Embedded, Some("1.2.3")),
-            None
+            Some(RemoteConnectionStatus {
+                address: "local embedded".to_string(),
+                version: "v1.2.3".to_string(),
+            })
         );
 
         let websocket_target = AppServerTarget::Remote {

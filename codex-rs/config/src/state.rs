@@ -13,9 +13,11 @@ use crate::ConfigLayerMetadata;
 use crate::ConfigLayerSource;
 use crate::ProfileV2Name;
 use crate::shell_environment_policy::validate_shell_environment_policy_filter_config;
+use crate::whatsapp::redact_whatsapp_toml_value;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
 use toml::Value as TomlValue;
@@ -103,7 +105,7 @@ impl LoaderOverrides {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct ConfigLayerEntry {
     pub name: ConfigLayerSource,
     pub config: TomlValue,
@@ -111,6 +113,28 @@ pub struct ConfigLayerEntry {
     pub disabled_reason: Option<String>,
     raw_toml: Option<RawTomlLayer>,
     hooks_config_folder_override: Option<AbsolutePathBuf>,
+}
+
+impl fmt::Debug for ConfigLayerEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut config = self.config.clone();
+        redact_whatsapp_toml_value(&mut config);
+        formatter
+            .debug_struct("ConfigLayerEntry")
+            .field("name", &self.name)
+            .field("config", &config)
+            .field("version", &self.version)
+            .field("disabled_reason", &self.disabled_reason)
+            .field(
+                "raw_toml",
+                &self.raw_toml.as_ref().map(|_| "[redacted raw TOML]"),
+            )
+            .field(
+                "hooks_config_folder_override",
+                &self.hooks_config_folder_override,
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -551,6 +575,17 @@ impl ConfigLayerStack {
 /// Validates before merging so mixed forms and malformed filter entries cannot be normalized away.
 pub(crate) fn validate_enabled_config_layers(layers: &[ConfigLayerEntry]) -> std::io::Result<()> {
     for layer in layers.iter().filter(|layer| !layer.is_disabled()) {
+        if layer.config.get("whatsapp").is_some()
+            && !matches!(layer.name, ConfigLayerSource::User { profile: None, .. })
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "[whatsapp] is allowed only in the base user config, not {}",
+                    format_config_layer_source(&layer.name, CONFIG_TOML_FILE)
+                ),
+            ));
+        }
         validate_shell_environment_policy_filter_config(&layer.config).map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -562,6 +597,18 @@ pub(crate) fn validate_enabled_config_layers(layers: &[ConfigLayerEntry]) -> std
         })?;
     }
     Ok(())
+}
+
+/// Returns a config-layer snapshot with integration credentials redacted.
+pub fn redacted_config_layer(layer: &ConfigLayerEntry) -> ConfigLayer {
+    let mut config = layer.config.clone();
+    redact_whatsapp_toml_value(&mut config);
+    ConfigLayer {
+        name: layer.name.clone(),
+        version: layer.version.clone(),
+        config: serde_json::to_value(config).unwrap_or_default(),
+        disabled_reason: layer.disabled_reason.clone(),
+    }
 }
 
 /// Ensures precedence ordering of config layers is correct. Returns the index

@@ -4,6 +4,7 @@ use codex_app_server_protocol::ConfigLayerSource as ApiConfigLayerSource;
 use codex_config::ConfigLayer;
 use codex_config::ConfigLayerMetadata;
 use codex_config::ConfigLayerSource;
+use codex_config::redacted_config_layer;
 
 /// Converts a config-layer source owned by `codex-config` into the app-server wire type owned by
 /// `codex-app-server-protocol`.
@@ -60,4 +61,10 @@ pub(crate) fn config_layer_to_api(layer: ConfigLayer) -> ApiConfigLayer {
         config: layer.config,
         disabled_reason: layer.disabled_reason,
     }
+}
+
+/// Converts a config layer while hiding credentials before it crosses the RPC
+/// boundary. Raw layer output is otherwise a direct view of config.toml.
+pub(crate) fn config_layer_entry_to_api(layer: &codex_config::ConfigLayerEntry) -> ApiConfigLayer {
+    config_layer_to_api(redacted_config_layer(layer))
 }

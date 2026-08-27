@@ -230,10 +230,6 @@ pub use public_widgets::composer_input::ComposerInput;
 
 const TUI_LOG_FILE_NAME: &str = "codex-tui.log";
 
-#[cfg(unix)]
-const AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(50);
-
 #[allow(clippy::too_many_arguments)]
 async fn start_embedded_app_server(
     arg0_paths: Arg0DispatchPaths,
@@ -421,23 +417,10 @@ async fn maybe_probe_default_daemon_socket(codex_home: &Path) -> Option<Absolute
         return None;
     }
 
-    match tokio::time::timeout(
-        AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT,
-        tokio::net::UnixStream::connect(socket_path.as_path()),
-    )
-    .await
-    {
-        Ok(Ok(_stream)) => Some(socket_path),
-        Ok(Err(err)) => {
+    match codex_app_server_daemon::probe_app_server_version(socket_path.as_path()).await {
+        Ok(_) => Some(socket_path),
+        Err(err) => {
             tracing::debug!(%err, socket_path = %socket_path.display(), "skipping default app-server daemon socket");
-            None
-        }
-        Err(_) => {
-            tracing::debug!(
-                socket_path = %socket_path.display(),
-                timeout_ms = AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT.as_millis(),
-                "timed out probing default app-server daemon socket"
-            );
             None
         }
     }
@@ -1326,7 +1309,7 @@ async fn run_ratatui_app(
     arg0_paths: Arg0DispatchPaths,
     loader_overrides: LoaderOverrides,
     strict_config: bool,
-    app_server_target: AppServerTarget,
+    mut app_server_target: AppServerTarget,
     remote_cwd_override: Option<PathBuf>,
     initial_config: Config,
     manually_selected_oss_provider: Option<String>,
@@ -1410,6 +1393,15 @@ async fn run_ratatui_app(
         }
     }
     .with_remote_cwd_override(remote_cwd_override.clone());
+    tracing::info!(
+        app_server = match &app_server_target {
+            AppServerTarget::Embedded => "local embedded",
+            AppServerTarget::LocalDaemon { .. } => "managed local",
+            AppServerTarget::Remote { .. } => "remote",
+        },
+        model_provider = %initial_config.model_provider_id,
+        "connected to Codex app-server"
+    );
     if let Some(provider) = manually_selected_oss_provider.as_deref()
         && let Err(err) = config_update::write_config_batch(
             app_server_session.request_handle(),
@@ -1445,6 +1437,7 @@ async fn run_ratatui_app(
         let onboarding_result = run_onboarding_app(
             OnboardingScreenArgs {
                 show_login_screen,
+                show_whatsapp_screen: should_show_whatsapp_screen(&initial_config),
                 show_trust_screen: should_show_trust_screen_flag,
                 login_status,
                 app_server_request_handle: app_server
@@ -1495,6 +1488,7 @@ async fn run_ratatui_app(
         // If the user made an explicit trust decision, or we showed the login flow, reload config
         // so current process state reflects persisted trust/auth changes.
         if onboarding_result.directory_trust_persisted
+            || onboarding_result.whatsapp_config_persisted
             || (show_login_screen && !uses_remote_workspace)
         {
             load_config_or_exit(
@@ -1511,6 +1505,30 @@ async fn run_ratatui_app(
     } else {
         initial_config
     };
+
+    if whatsapp_is_enabled(&config) && matches!(app_server_target, AppServerTarget::Embedded) {
+        shutdown_app_server_if_present(app_server.take()).await;
+        app_server_target = start_whatsapp_app_server_daemon(&arg0_paths, &config).await?;
+        let app_server_client = start_app_server(
+            &app_server_target,
+            arg0_paths.clone(),
+            config.clone(),
+            cli_kv_overrides.clone(),
+            loader_overrides.clone(),
+            strict_config,
+            cloud_config_bundle.clone(),
+            feedback.clone(),
+            log_db.clone(),
+            state_db.clone(),
+            environment_manager.clone(),
+        )
+        .await?;
+        app_server = Some(
+            AppServerSession::new(app_server_client, app_server_target.thread_params_mode())
+                .with_remote_cwd_override(remote_cwd_override.clone()),
+        );
+        tracing::info!(target = "managed local", "connected to Codex app-server");
+    }
 
     let mut missing_session_exit = |id_str: &str, action: &str| {
         error!("Error finding conversation path: {id_str}");
@@ -2025,7 +2043,69 @@ fn should_show_onboarding(
         return true;
     }
 
-    should_show_login_screen(login_status, config)
+    should_show_login_screen(login_status, config) || should_show_whatsapp_screen(config)
+}
+
+fn should_show_whatsapp_screen(config: &Config) -> bool {
+    let whatsapp = config
+        .config_layer_stack
+        .get_active_user_layer()
+        .and_then(|layer| layer.config.get("whatsapp"))
+        .cloned()
+        .and_then(|value| value.try_into::<codex_config::WhatsAppConfigToml>().ok());
+    !whatsapp
+        .as_ref()
+        .is_some_and(codex_config::WhatsAppConfigToml::is_complete)
+}
+
+fn whatsapp_is_enabled(config: &Config) -> bool {
+    config
+        .config_layer_stack
+        .get_active_user_layer()
+        .and_then(|layer| layer.config.get("whatsapp"))
+        .cloned()
+        .and_then(|value| value.try_into::<codex_config::WhatsAppConfigToml>().ok())
+        .is_some_and(|whatsapp| whatsapp.enabled)
+}
+
+#[cfg(unix)]
+async fn start_whatsapp_app_server_daemon(
+    arg0_paths: &Arg0DispatchPaths,
+    config: &Config,
+) -> color_eyre::Result<AppServerTarget> {
+    let codex_executable = arg0_paths
+        .codex_self_exe
+        .as_ref()
+        .ok_or_else(|| color_eyre::eyre::eyre!("could not locate the Codex executable"))?;
+    let socket_path =
+        codex_app_server_client::app_server_control_socket_path(config.codex_home.as_path())?;
+    let lifecycle = codex_app_server_daemon::ensure_started_with_binary(
+        config.codex_home.as_path(),
+        codex_executable,
+    )
+    .await
+    .map_err(|error| {
+        color_eyre::eyre::eyre!("failed to ensure the managed local Codex app-server: {error:#}")
+    })?;
+    tracing::info!(
+        status = ?lifecycle.status,
+        pid = ?lifecycle.pid,
+        socket_path = %lifecycle.socket_path.display(),
+        "managed local Codex app-server is ready"
+    );
+    Ok(AppServerTarget::LocalDaemon {
+        endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
+    })
+}
+
+#[cfg(not(unix))]
+async fn start_whatsapp_app_server_daemon(
+    _arg0_paths: &Arg0DispatchPaths,
+    _config: &Config,
+) -> color_eyre::Result<AppServerTarget> {
+    color_eyre::eyre::bail!(
+        "WhatsApp gateway setup currently requires a Unix local app-server daemon"
+    )
 }
 
 fn should_show_login_screen(login_status: LoginStatus, config: &Config) -> bool {
@@ -2551,16 +2631,22 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn default_daemon_auto_connect_probes_socket_only() -> color_eyre::Result<()> {
+    async fn default_daemon_auto_connect_rejects_non_app_server_socket() -> color_eyre::Result<()> {
         let codex_home = TempDir::new()?;
         let socket_path =
             codex_app_server_client::app_server_control_socket_path(codex_home.path())?;
         std::fs::create_dir_all(socket_path.as_path().parent().expect("socket parent"))?;
-        let _listener = tokio::net::UnixListener::bind(socket_path.as_path())?;
+        let listener = tokio::net::UnixListener::bind(socket_path.as_path())?;
+        tokio::spawn(async move {
+            if let Ok((stream, _address)) = listener.accept().await {
+                drop(stream);
+            }
+        });
 
-        assert_eq!(
-            maybe_probe_default_daemon_socket(codex_home.path()).await,
-            Some(socket_path)
+        assert!(
+            maybe_probe_default_daemon_socket(codex_home.path())
+                .await
+                .is_none()
         );
         Ok(())
     }

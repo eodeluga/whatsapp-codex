@@ -4776,6 +4776,24 @@
       },
       "type": "object"
     },
+    "WhatsAppConfigToml": {
+      "additionalProperties": false,
+      "description": "Top-level `[whatsapp]` settings stored in the base user configuration.",
+      "properties": {
+        "account_phone_number": {
+          "type": "string"
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "onboarding_complete": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "WindowsSandboxModeToml": {
       "enum": [
         "elevated",
@@ -5750,6 +5768,15 @@
         }
       ],
       "description": "Controls the web search tool mode: disabled, cached, indexed, or live."
+    },
+    "whatsapp": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/WhatsAppConfigToml"
+        }
+      ],
+      "default": null,
+      "description": "Self-hosted WhatsApp bridge settings. These are accepted only from the base user config layer."
     },
     "windows": {
       "allOf": [

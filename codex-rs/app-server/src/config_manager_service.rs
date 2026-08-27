@@ -1,5 +1,5 @@
+use crate::config_layer::config_layer_entry_to_api;
 use crate::config_layer::config_layer_metadata_to_api;
-use crate::config_layer::config_layer_to_api;
 use crate::config_manager::ConfigManager;
 use codex_app_server_protocol::Config as ApiConfig;
 use codex_app_server_protocol::ConfigBatchWriteParams;
@@ -137,6 +137,9 @@ impl ConfigManager {
             .requirements_toml()
             .apply_exact_to_config(&mut effective_config_toml);
         effective_config_toml.allow_login_shell.get_or_insert(true);
+        if let Some(whatsapp) = effective_config_toml.whatsapp.as_mut() {
+            *whatsapp = whatsapp.redacted();
+        }
 
         let json_value = serde_json::to_value(&effective_config_toml)
             .map_err(|err| ConfigManagerError::json("failed to serialize configuration", err))?;
@@ -164,8 +167,8 @@ impl ConfigManager {
                         ConfigLayerStackOrdering::HighestPrecedenceFirst,
                         /*include_disabled*/ true,
                     )
-                    .iter()
-                    .map(|layer| config_layer_to_api(layer.as_layer()))
+                    .into_iter()
+                    .map(config_layer_entry_to_api)
                     .collect()
             }),
         })
@@ -427,6 +430,16 @@ impl ConfigManager {
                 .apply()
                 .await
                 .map_err(|err| ConfigManagerError::anyhow("failed to persist config.toml", err))?;
+            if parsed_segments
+                .iter()
+                .any(|segments| matches!(segments.first(), Some(segment) if segment == "whatsapp"))
+            {
+                set_private_config_permissions(provided_path.as_path())
+                    .await
+                    .map_err(|err| {
+                        ConfigManagerError::io("failed to restrict config.toml permissions", err)
+                    })?;
+            }
         }
 
         let overridden = first_overridden_edit(&updated_layers, &effective, &parsed_segments);
@@ -458,6 +471,18 @@ impl ConfigManager {
     async fn load_thread_agnostic_config(&self) -> std::io::Result<ConfigLayerStack> {
         self.load_config_layers(/*cwd*/ None).await
     }
+}
+
+#[cfg(unix)]
+async fn set_private_config_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await
+}
+
+#[cfg(not(unix))]
+async fn set_private_config_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 async fn create_empty_user_layer(

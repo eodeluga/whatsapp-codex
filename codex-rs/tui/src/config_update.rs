@@ -163,6 +163,26 @@ pub(crate) async fn write_config_batch(
         .wrap_err("config/batchWrite failed in TUI")
 }
 
+pub(crate) async fn write_user_config_batch(
+    request_handle: AppServerRequestHandle,
+    config_path: &Path,
+    edits: Vec<ConfigEdit>,
+) -> Result<ConfigWriteResponse> {
+    let request_id = RequestId::String(format!("tui-config-write-{}", Uuid::new_v4()));
+    request_handle
+        .request_typed(ClientRequest::ConfigBatchWrite {
+            request_id,
+            params: ConfigBatchWriteParams {
+                edits,
+                file_path: Some(config_path.display().to_string()),
+                expected_version: None,
+                reload_user_config: true,
+            },
+        })
+        .await
+        .wrap_err("config/batchWrite failed in TUI")
+}
+
 pub(crate) async fn write_trusted_project(
     request_handle: AppServerRequestHandle,
     project_path: &Path,

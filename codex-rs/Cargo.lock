@@ -2584,6 +2584,7 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "tracing",
+ "url",
  "wildmatch",
  "winapi-util",
  "windows-sys 0.52.0",
@@ -4174,6 +4175,7 @@ dependencies = [
  "clap",
  "codex-ansi-escape",
  "codex-app-server-client",
+ "codex-app-server-daemon",
  "codex-app-server-protocol",
  "codex-arg0",
  "codex-cli",
@@ -4554,6 +4556,31 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite",
  "url",
+]
+
+[[package]]
+name = "codex-whatsapp-bridge"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "codex-app-server-client",
+ "codex-app-server-protocol",
+ "codex-config",
+ "codex-utils-absolute-path",
+ "hmac 0.12.1",
+ "pretty_assertions",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
 ]
 
 [[package]]

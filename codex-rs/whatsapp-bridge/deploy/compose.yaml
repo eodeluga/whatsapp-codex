@@ -1,0 +1,51 @@
+services:
+  baileys-gateway:
+    restart: unless-stopped
+    build:
+      context: ../..
+      dockerfile: whatsapp-bridge/baileys-gateway/Dockerfile
+    volumes:
+      - ${CODEX_HOME:-${HOME}/.codex}/whatsapp:/codex-home/whatsapp:ro
+      - baileys-auth:/data/auth
+    networks: [transport-egress]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          node -e 'const fs=require("fs"); const c=JSON.parse(fs.readFileSync("/codex-home/whatsapp/runtime.json"));
+          fetch("http://127.0.0.1:3000/v1/status",{headers:{authorization:"Bearer "+c.transportApiToken}})
+          .then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))'
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  codex-whatsapp-bridge:
+    restart: unless-stopped
+    image: ${CODEX_WHATSAPP_BRIDGE_IMAGE:-codex-whatsapp-bridge:local}
+    build:
+      context: ../..
+      dockerfile: whatsapp-bridge/deploy/Dockerfile
+    command: ["--config", "/codex-home/config.toml"]
+    volumes:
+      - ${CODEX_HOME:-${HOME}/.codex}/config.toml:/codex-home/config.toml:ro
+      - ${CODEX_HOME:-${HOME}/.codex}/whatsapp:/codex-home/whatsapp
+      - ${CODEX_HOME:-${HOME}/.codex}/app-server-control:/codex-home/app-server-control
+    networks: [transport-egress]
+    ports: ["127.0.0.1:8787:8787"]
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "codex-whatsapp-bridge", "--healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      baileys-gateway:
+        condition: service_healthy
+
+networks:
+  transport-egress:
+
+volumes:
+  baileys-auth:

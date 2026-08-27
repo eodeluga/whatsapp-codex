@@ -1,81 +1,220 @@
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# WhatsApp Codex
 
----
+WhatsApp Codex adds your private WhatsApp self-chat as a first-class input to a
+normal local Codex session. Terminal and WhatsApp messages use Codex's normal
+threads, history, tools, sandboxing, and approval flow. The gateway does not
+create a separate agent, workspace, or conversation model.
+
+This repository currently provides a source-build installation. Codex runs on
+the host, while the supplied Docker Compose deployment runs Baileys transport and the
+small WhatsApp bridge.
+
+## Prerequisites
+
+You need:
+
+- a Rust toolchain compatible with `codex-rs/rust-toolchain.toml`;
+- Docker Engine or Docker Desktop with the daemon running;
+- Docker Compose v2 (`docker compose version`); and
+- a WhatsApp account that can link another device.
+
+Docker is optional when WhatsApp support is disabled. Normal terminal Codex
+does not depend on the gateway.
 
 ## Quickstart
 
-### Installing and running Codex CLI
+### 1. Build Codex
 
-Run the following on Mac or Linux to install Codex CLI:
-
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
-```
-
-Run the following on Windows to install Codex CLI:
+From the repository root:
 
 ```shell
-powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
+cd codex-rs
+cargo build --locked --release -p codex-cli
 ```
 
-The standalone installers download from `https://releases.openai.com/codex` by default and fall back to GitHub Releases if a metadata or asset download is unavailable. To force GitHub Releases, set `CODEX_INSTALLER_USE_RELEASES_OPENAI_COM` to `false` (`0` and `no` are also accepted):
+The host only needs the Codex binary. Docker builds the bridge binary inside
+its own image, so building `codex-whatsapp-bridge` with host Cargo is not
+required.
+
+### 2. Complete onboarding and keep Codex running
+
+Start the compiled binary:
 
 ```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=false sh
+./target/release/codex
 ```
 
-```powershell
-$env:CODEX_INSTALLER_USE_RELEASES_OPENAI_COM='false'; irm https://chatgpt.com/codex/install.ps1 | iex
-```
+During first-run onboarding, Codex completes its normal sign-in and trust flow,
+then asks whether to enable WhatsApp. If enabled, enter only your own E.164
+phone number, including its country code, such as `+447700900000`.
 
-Codex CLI can also be installed via the following package managers:
+Codex checks Docker and Compose, creates private gateway state under the normal
+Codex home directory, and starts its local app-server daemon from your user
+home directory. Leave this Codex session running while starting the gateway.
+
+### 3. Start the gateway
+
+In another terminal, from the repository root:
 
 ```shell
-# Install using npm
-npm install -g @openai/codex
+docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml up -d --build
 ```
+
+The first build can take several minutes. Compose builds and starts:
+
+- Baileys transport, which owns the linked WhatsApp session; and
+- `codex-whatsapp-bridge`, which connects Baileys transport to the host Codex app-server.
+
+Baileys credentials and internal transport settings are
+created and stored internally. Do not enter them manually.
+
+### 4. Pair WhatsApp
+
+Open [http://127.0.0.1:8787/pairing](http://127.0.0.1:8787/pairing) in a browser.
+In WhatsApp, open **Linked devices**, choose **Link a device**, and scan the QR
+code. The page refreshes while pairing and then displays:
+
+> Pairing complete. WhatsApp Codex is connected. You may now close this page.
+
+### 5. Verify the connection
+
+Send `/status` in your WhatsApp self-chat. A ready installation reports the
+Codex app-server as connected and Baileys transport as healthy. Any other plain text, such
+as `Summarise the current project`, starts a normal Codex turn.
+
+The terminal and WhatsApp use the same normal Codex history. WhatsApp also
+provides:
+
+- `/help` (or `/`) to display the configured WhatsApp and standard Codex
+  slash-command catalogue;
+- `/whatsapp list-threads` to list recent resumable Codex threads; and
+- `/whatsapp attach <thread-id>` to select one explicitly.
+
+## Configuration
+
+User-owned configuration is stored in the normal Codex configuration file,
+usually `~/.codex/config.toml`:
+
+```toml
+[whatsapp]
+onboarding_complete = true
+enabled = true
+account_phone_number = "+447700900000"
+```
+
+Private runtime data is stored under `~/.codex/whatsapp/`. There is no
+WhatsApp-specific workspace, required input prefix, transport API token, webhook
+URL, or Docker environment variable to configure.
+
+The gateway creates a user-editable command and display catalogue at
+`~/.codex/whatsapp/commands.json` the first time it starts. This file contains
+the WhatsApp controls, the standard Codex TUI slash commands, help headings and
+footer, and the outbound response prefix. Editing it does not require rebuilding
+either binary or container: send `/help` to reload and display the catalogue.
+The catalogue controls discovery text only; it cannot enable a command that the
+WhatsApp transport does not implement.
+
+## Operations
+
+Check container and endpoint status from the repository root:
 
 ```shell
-# Install using Homebrew
-brew install --cask codex
+docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml ps
+curl --fail http://127.0.0.1:8787/health/live
+curl --fail http://127.0.0.1:8787/health/ready
 ```
 
-Then simply run `codex` to get started.
+`health/live` confirms that the bridge process is running. `health/ready`
+returns success only when durable state, the Baileys transport, and the Codex
+app-server are all available. Its JSON response identifies each component, for
+example:
 
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
+```json
+{"ready":true,"stateHealthy":true,"appServerConnected":true,"transportHealthy":true}
+```
 
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
+Follow gateway logs with:
 
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
+```shell
+docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml logs -f \
+  codex-whatsapp-bridge baileys-gateway
+```
 
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
+Restarting the containers preserves Baileys transport and bridge state:
 
-</details>
+```shell
+docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml restart
+```
 
-### Using Codex with your ChatGPT plan
+The bridge automatically reconnects to the persisted Baileys transport. You normally do
+not need to pair again. If the pairing page presents a new QR code, Baileys transport no
+longer has an authenticated session and must be linked again. Do not delete the
+`baileys-auth` volume during routine restart or upgrade work.
 
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
+After changing only bridge source, rebuild and recreate only that service:
 
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
+```shell
+docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml \
+  build codex-whatsapp-bridge
+docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml \
+  up -d --no-deps --force-recreate codex-whatsapp-bridge
+```
 
-## Docs
+## Troubleshooting
 
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
+### The pairing page cannot be reached
+
+Run `docker compose ... ps` using the full Compose path shown above. The bridge
+must publish `127.0.0.1:8787->8787/tcp`. If it was interrupted while being
+recreated, repeat the bridge-only `up -d --no-deps --force-recreate` command.
+
+### The pairing page says the gateway is starting
+
+Baileys transport may still be starting or restoring its persisted session. Check the
+logs and leave the page open; it refreshes automatically until pairing or the
+restored session is available.
+
+### WhatsApp reports that the app-server is unavailable
+
+Start the compiled Codex TUI once. When WhatsApp is enabled, the TUI
+idempotently ensures a detached, pid-managed local app-server and waits for its
+protocol readiness before opening the normal chat UI. The app-server survives
+TUI exit and container restarts. The bridge queues prompts and reconnects
+automatically; repeated retries do not generate repeated WhatsApp errors.
+
+Inspect component readiness and the managed daemon with:
+
+```shell
+curl -sS http://127.0.0.1:8787/health/ready
+codex app-server daemon version
+```
+
+Managed app-server stderr is retained under
+`~/.codex/app-server-daemon/app-server.stderr.log` for startup diagnosis.
+
+### Disk usage is unexpectedly large
+
+Rust release and test builds can produce a large `codex-rs/target/` directory.
+The Docker build excludes that directory. Remove host build artifacts only
+when you intentionally want a clean rebuild:
+
+```shell
+cd codex-rs
+cargo clean
+```
+
+## Development validation
+
+Run targeted repository workflows from `codex-rs`:
+
+```shell
+just fmt
+just test -p codex-config
+just test -p codex-tui
+just test -p codex-whatsapp-bridge
+```
+
+The complete workspace test suite is intentionally not part of the routine
+workflow because it is resource intensive.
 
 This repository is licensed under the [Apache-2.0 License](LICENSE).
