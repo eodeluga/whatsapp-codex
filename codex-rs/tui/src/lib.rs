@@ -230,10 +230,6 @@ pub use public_widgets::composer_input::ComposerInput;
 
 const TUI_LOG_FILE_NAME: &str = "codex-tui.log";
 
-#[cfg(unix)]
-const AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(50);
-
 #[allow(clippy::too_many_arguments)]
 async fn start_embedded_app_server(
     arg0_paths: Arg0DispatchPaths,
@@ -421,23 +417,10 @@ async fn maybe_probe_default_daemon_socket(codex_home: &Path) -> Option<Absolute
         return None;
     }
 
-    match tokio::time::timeout(
-        AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT,
-        tokio::net::UnixStream::connect(socket_path.as_path()),
-    )
-    .await
-    {
-        Ok(Ok(_stream)) => Some(socket_path),
-        Ok(Err(err)) => {
+    match codex_app_server_daemon::probe_app_server_version(socket_path.as_path()).await {
+        Ok(_) => Some(socket_path),
+        Err(err) => {
             tracing::debug!(%err, socket_path = %socket_path.display(), "skipping default app-server daemon socket");
-            None
-        }
-        Err(_) => {
-            tracing::debug!(
-                socket_path = %socket_path.display(),
-                timeout_ms = AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT.as_millis(),
-                "timed out probing default app-server daemon socket"
-            );
             None
         }
     }
@@ -1410,6 +1393,15 @@ async fn run_ratatui_app(
         }
     }
     .with_remote_cwd_override(remote_cwd_override.clone());
+    tracing::info!(
+        app_server = match &app_server_target {
+            AppServerTarget::Embedded => "local embedded",
+            AppServerTarget::LocalDaemon { .. } => "managed local",
+            AppServerTarget::Remote { .. } => "remote",
+        },
+        model_provider = %initial_config.model_provider_id,
+        "connected to Codex app-server"
+    );
     if let Some(provider) = manually_selected_oss_provider.as_deref()
         && let Err(err) = config_update::write_config_batch(
             app_server_session.request_handle(),
@@ -1535,6 +1527,7 @@ async fn run_ratatui_app(
             AppServerSession::new(app_server_client, app_server_target.thread_params_mode())
                 .with_remote_cwd_override(remote_cwd_override.clone()),
         );
+        tracing::info!(target = "managed local", "connected to Codex app-server");
     }
 
     let mut missing_session_exit = |id_str: &str, action: &str| {
@@ -2086,37 +2079,20 @@ async fn start_whatsapp_app_server_daemon(
         .ok_or_else(|| color_eyre::eyre::eyre!("could not locate the Codex executable"))?;
     let socket_path =
         codex_app_server_client::app_server_control_socket_path(config.codex_home.as_path())?;
-    if socket_path.as_path().exists() {
-        return Ok(AppServerTarget::LocalDaemon {
-            endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
-        });
-    }
-    let user_home = dirs::home_dir()
-        .ok_or_else(|| color_eyre::eyre::eyre!("could not locate the user home directory"))?;
-    let mut child = tokio::process::Command::new(codex_executable);
-    child
-        .args(["app-server", "--listen", "unix://"])
-        .current_dir(user_home)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let mut child = child
-        .spawn()
-        .wrap_err("failed to start the local Codex app-server")?;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !socket_path.as_path().exists() && tokio::time::Instant::now() < deadline {
-        if child
-            .try_wait()
-            .wrap_err("failed while starting the local Codex app-server")?
-            .is_some()
-        {
-            color_eyre::eyre::bail!("the local Codex app-server exited during startup");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    if !socket_path.as_path().exists() {
-        color_eyre::eyre::bail!("the local Codex app-server did not create its control socket");
-    }
+    let lifecycle = codex_app_server_daemon::ensure_started_with_binary(
+        config.codex_home.as_path(),
+        codex_executable,
+    )
+    .await
+    .map_err(|error| {
+        color_eyre::eyre::eyre!("failed to ensure the managed local Codex app-server: {error:#}")
+    })?;
+    tracing::info!(
+        status = ?lifecycle.status,
+        pid = ?lifecycle.pid,
+        socket_path = %lifecycle.socket_path.display(),
+        "managed local Codex app-server is ready"
+    );
     Ok(AppServerTarget::LocalDaemon {
         endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
     })
@@ -2655,16 +2631,22 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn default_daemon_auto_connect_probes_socket_only() -> color_eyre::Result<()> {
+    async fn default_daemon_auto_connect_rejects_non_app_server_socket() -> color_eyre::Result<()> {
         let codex_home = TempDir::new()?;
         let socket_path =
             codex_app_server_client::app_server_control_socket_path(codex_home.path())?;
         std::fs::create_dir_all(socket_path.as_path().parent().expect("socket parent"))?;
-        let _listener = tokio::net::UnixListener::bind(socket_path.as_path())?;
+        let listener = tokio::net::UnixListener::bind(socket_path.as_path())?;
+        tokio::spawn(async move {
+            if let Ok((stream, _address)) = listener.accept().await {
+                drop(stream);
+            }
+        });
 
-        assert_eq!(
-            maybe_probe_default_daemon_socket(codex_home.path()).await,
-            Some(socket_path)
+        assert!(
+            maybe_probe_default_daemon_socket(codex_home.path())
+                .await
+                .is_none()
         );
         Ok(())
     }
