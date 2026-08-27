@@ -29,12 +29,12 @@ result
 *.swp
 *~
 
-# cli tools
-CLAUDE.md
+# md files
+!README.md
+*.md
+
+# tooling
 .claude/
-AGENTS.override.md
-PLAN.md
-LOCAL-AGENTS.md
 
 # caches
 .cache/
