@@ -108,6 +108,13 @@ or `bootstrap` does not race another in-flight lifecycle operation.
 The daemon stores its local state under `CODEX_HOME/app-server-daemon/`:
 
 - `settings.json` for persisted launch settings
+- `selected-binary.json` for the executable selected by an in-process source-build client
 - `app-server.pid` for the app-server process record
 - `app-server-updater.pid` for the pid-backed standalone updater loop
 - `daemon.lock` for daemon-wide lifecycle serialization
+
+When the TUI enables a local remote-input transport from a source build, it
+records that build's executable in `selected-binary.json`. Later daemon
+`start`, `restart`, and `stop` operations reuse the same executable until a
+managed standalone installation becomes available. Managed installations
+remain preferred when present.

@@ -54,6 +54,8 @@ The deployment publishes only loopback management endpoints:
 
 Baileys transport and the bridge also share an internal Docker network for webhook and
 REST traffic. The host app-server is not exposed on a TCP network interface.
+The readiness endpoint returns a JSON component snapshot while using HTTP
+`200` for ready and `503` for degraded operation.
 
 ## Operate the deployment
 
@@ -68,6 +70,10 @@ Container restarts preserve the named `baileys-auth` volume and the bridge state
 under `CODEX_HOME/whatsapp/`. Persisted inactive Baileys transport sessions are restarted
 automatically. Do not remove the volume unless deliberately resetting the
 linked WhatsApp session.
+
+Both services use `restart: unless-stopped`. The bridge has an end-to-end
+healthcheck but handles dependency outages through its bounded reconnect loop,
+so a temporary app-server or WhatsApp outage does not create a restart storm.
 
 To rebuild only this bridge after a source change:
 
