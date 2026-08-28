@@ -13,6 +13,7 @@ use tempfile::tempdir;
 #[derive(Clone, Default)]
 struct FakeCodex {
     turns: Arc<Mutex<Vec<(String, String, String)>>>,
+    steers: Arc<Mutex<Vec<(String, String, String, String)>>>,
     start_thread_fails: Arc<AtomicBool>,
 }
 
@@ -44,6 +45,20 @@ impl CodexClient for FakeCodex {
             .unwrap()
             .push((thread_id, message_id, prompt));
         Ok("turn-1".to_string())
+    }
+
+    async fn steer_turn(
+        &self,
+        thread_id: String,
+        turn_id: String,
+        message_id: String,
+        prompt: String,
+    ) -> Result<(), CodexError> {
+        self.steers
+            .lock()
+            .unwrap()
+            .push((thread_id, turn_id, message_id, prompt));
+        Ok(())
     }
 
     async fn interrupt_turn(&self, _thread_id: String, _turn_id: String) -> Result<(), CodexError> {
@@ -194,6 +209,87 @@ async fn durable_deduplication_starts_one_turn_for_a_replayed_webhook() {
             .map(|turn| turn.codex_turn_id.as_str()),
         Some("turn-1")
     );
+}
+
+#[tokio::test]
+async fn message_during_active_turn_uses_steer_without_queueing_a_second_turn() {
+    let directory = tempdir().unwrap();
+    let state_path = directory.path().join("state.json");
+    let codex = FakeCodex::default();
+    let recorded_steers = Arc::clone(&codex.steers);
+    let mut state = BridgeState::empty();
+    state.binding = Some(crate::state::ThreadBinding {
+        self_chat_id: "447700900000@c.us".to_string(),
+        codex_thread_id: "thread-1".to_string(),
+    });
+    state.active_turn = Some(crate::state::ActiveTurn {
+        inbound_message_id: "message-1".to_string(),
+        thread_id: "thread-1".to_string(),
+        codex_turn_id: "turn-1".to_string(),
+        working_output_message_id: None,
+    });
+    let readiness = Arc::new(BridgeReadiness::new(BridgeReadinessSnapshot {
+        ready: true,
+        state_healthy: true,
+        app_server_connected: true,
+        transport_healthy: true,
+    }));
+    let (commands, command_rx) = mpsc::channel(8);
+    let (command_catalog, command_catalog_path) =
+        CommandCatalog::load_or_create(directory.path()).unwrap();
+    let coordinator = Coordinator::new(
+        codex,
+        FakeTransport::default(),
+        state,
+        state_path.clone(),
+        "447700900000".to_string(),
+        "447700900000@c.us".to_string(),
+        3_500,
+        1_500,
+        20,
+        100,
+        24,
+        command_catalog,
+        command_catalog_path,
+        readiness,
+        true,
+        true,
+    );
+    let task = tokio::spawn(coordinator.run(command_rx));
+    let (accepted, accepted_rx) = tokio::sync::oneshot::channel();
+    commands
+        .send(CoordinatorCommand::Inbound {
+            message: InboundMessage {
+                idempotency_key: "event-steer".to_string(),
+                message_id: "message-steer".to_string(),
+                chat_id: "447700900000@c.us".to_string(),
+                body: "keep checking".to_string(),
+            },
+            accepted,
+        })
+        .await
+        .unwrap();
+    assert!(accepted_rx.await.unwrap());
+    let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+    commands
+        .send(CoordinatorCommand::Shutdown(shutdown))
+        .await
+        .unwrap();
+    shutdown_rx.await.unwrap();
+    task.await.unwrap();
+
+    assert_eq!(
+        *recorded_steers.lock().unwrap(),
+        vec![(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            "message-steer".to_string(),
+            "keep checking".to_string(),
+        )]
+    );
+    let persisted = BridgeState::load(&state_path).unwrap();
+    assert!(persisted.pending_steers.is_empty());
+    assert!(persisted.queued_prompts.is_empty());
 }
 
 #[tokio::test]

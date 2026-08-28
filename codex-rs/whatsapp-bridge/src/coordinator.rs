@@ -11,6 +11,7 @@ use crate::output::OutputAggregator;
 use crate::output::labelled_chunks;
 use crate::state::BridgeState;
 use crate::state::OutboundMessage;
+use crate::state::PendingSteer;
 use crate::state::QueuedPrompt;
 use crate::state::unix_timestamp;
 use crate::transport::TransportClient;
@@ -24,14 +25,20 @@ use codex_app_server_protocol::GrantedPermissionProfile;
 use codex_app_server_protocol::PermissionGrantScope;
 use codex_app_server_protocol::PermissionsRequestApprovalResponse;
 use codex_app_server_protocol::RequestId;
-use codex_app_server_protocol::RequestPermissionProfile;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ToolRequestUserInputAnswer;
 use codex_app_server_protocol::ToolRequestUserInputResponse;
 use codex_app_server_protocol::TurnStatus;
+use codex_utils_approval_presentation::ApprovalDecision;
+use codex_utils_approval_presentation::ApprovalPresentation;
+use codex_utils_approval_presentation::command_execution_presentation;
+use codex_utils_approval_presentation::file_change_presentation;
+use codex_utils_approval_presentation::permissions_presentation;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -40,10 +47,10 @@ use uuid::Uuid;
 const MAX_PROMPT_BYTES: usize = 10_000;
 const MAX_OUTBOX_MESSAGES: usize = 100;
 const MAX_PENDING_REQUESTS: usize = 32;
+const USER_INPUT_TIMEOUT_SECONDS: u64 = 300;
 const MAX_FILE_CHANGE_ITEMS: usize = 128;
 const MAX_FILE_CHANGE_PATHS: usize = 128;
 const MAX_FILE_CHANGE_PATH_CHARS: usize = 512;
-const APPROVAL_TIMEOUT_SECONDS: u64 = 300;
 const LOCAL_RECOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub enum CoordinatorCommand {
@@ -60,47 +67,62 @@ enum AcceptedAction {
     PromptTooLong,
     QueueFull,
     StartQueuedPrompt,
+    Steer(PendingSteer),
+    ApprovalChoice(usize),
+    ApprovalInputBlocked,
 }
 
 #[derive(Clone)]
 enum PendingRequest {
-    Command {
-        request_id: RequestId,
-        available_decisions: Option<Vec<CommandExecutionApprovalDecision>>,
-        expires_at: u64,
-    },
-    FileChange {
-        request_id: RequestId,
-        expires_at: u64,
-    },
     UserInput {
         request_id: RequestId,
         question_id: String,
-        expires_at: u64,
-    },
-    Permissions {
-        request_id: RequestId,
-        permissions: RequestPermissionProfile,
         expires_at: u64,
     },
 }
 
 impl PendingRequest {
     fn request_id(&self) -> &RequestId {
+        let Self::UserInput { request_id, .. } = self;
+        request_id
+    }
+
+    fn expires_at(&self) -> u64 {
+        let Self::UserInput { expires_at, .. } = self;
+        *expires_at
+    }
+}
+
+#[derive(Clone)]
+enum PendingApproval {
+    Command {
+        request_id: RequestId,
+        presentation: ApprovalPresentation,
+    },
+    FileChange {
+        request_id: RequestId,
+        presentation: ApprovalPresentation,
+    },
+    Permissions {
+        request_id: RequestId,
+        presentation: ApprovalPresentation,
+    },
+}
+
+impl PendingApproval {
+    fn request_id(&self) -> &RequestId {
         match self {
             Self::Command { request_id, .. }
             | Self::FileChange { request_id, .. }
-            | Self::UserInput { request_id, .. }
             | Self::Permissions { request_id, .. } => request_id,
         }
     }
 
-    fn expires_at(&self) -> u64 {
+    fn presentation(&self) -> &ApprovalPresentation {
         match self {
-            Self::Command { expires_at, .. }
-            | Self::FileChange { expires_at, .. }
-            | Self::UserInput { expires_at, .. }
-            | Self::Permissions { expires_at, .. } => *expires_at,
+            Self::Command { presentation, .. }
+            | Self::FileChange { presentation, .. }
+            | Self::Permissions { presentation, .. } => presentation,
         }
     }
 }
@@ -122,6 +144,7 @@ pub struct Coordinator<C, O> {
     output: OutputAggregator,
     file_change_paths: HashMap<(String, String, String), Vec<String>>,
     pending_requests: HashMap<String, PendingRequest>,
+    pending_approvals: VecDeque<PendingApproval>,
     state_healthy: bool,
     app_server_connected: bool,
     transport_healthy: bool,
@@ -169,6 +192,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             output: OutputAggregator::default(),
             file_change_paths: HashMap::new(),
             pending_requests: HashMap::new(),
+            pending_approvals: VecDeque::new(),
             state_healthy: true,
             app_server_connected,
             transport_healthy,
@@ -212,7 +236,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
         }
         let mut retry_outbox = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut recover_state = tokio::time::interval(std::time::Duration::from_secs(5));
-        let mut expire_approvals = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut expire_requests = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut reconcile_turn_start = tokio::time::interval(std::time::Duration::from_secs(5));
         let transport_check_interval = LOCAL_RECOVERY_INTERVAL;
         let mut check_transport = tokio::time::interval_at(
@@ -254,7 +278,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                     _ = recover_state.tick(), if !self.state_healthy => {
                         self.recover_state_storage();
                     },
-                    _ = expire_approvals.tick(), if !self.pending_requests.is_empty() => {
+                    _ = expire_requests.tick(), if !self.pending_requests.is_empty() => {
                         self.expire_pending_requests().await;
                     },
                     _ = reconcile_turn_start.tick(), if self.has_uncertain_turn_start() => {
@@ -332,6 +356,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
         self.app_server_connected = false;
         self.refresh_readiness();
         self.pending_requests.clear();
+        self.pending_approvals.clear();
         self.stream_degraded = true;
         self.send(
             "[codex] Codex app-server disconnected; queued prompts will resume after reconnection.",
@@ -346,6 +371,8 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
         match self.codex.resume_thread(binding.codex_thread_id).await {
             Ok(response) => {
                 self.resume_failures = 0;
+                self.reconcile_pending_steers(&response).await;
+                self.retry_pending_steers().await;
                 if let Some(active) = self.state.active_turn.clone() {
                     let matching_turn = response
                         .thread
@@ -449,6 +476,12 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                 for request_id in requests {
                     let _ = self.codex.reject_server_request(request_id).await;
                 }
+                for approval in self.pending_approvals.drain(..) {
+                    let _ = self
+                        .codex
+                        .reject_server_request(approval.request_id().clone())
+                        .await;
+                }
                 let _ =
                     tokio::time::timeout(std::time::Duration::from_secs(10), self.flush_outbox())
                         .await;
@@ -488,6 +521,26 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             BridgeCommand::Prompt(body) => {
                 if body.len() > MAX_PROMPT_BYTES {
                     AcceptedAction::PromptTooLong
+                } else if self.pending_approvals.front().is_some() {
+                    if let Some(choice) = parse_approval_choice(&body) {
+                        AcceptedAction::ApprovalChoice(choice)
+                    } else {
+                        AcceptedAction::ApprovalInputBlocked
+                    }
+                } else if self.state.pending_steers.len() >= self.max_queued_prompts {
+                    AcceptedAction::QueueFull
+                } else if let Some(active) = self.state.active_turn.clone() {
+                    let steer = PendingSteer {
+                        idempotency_key: message.idempotency_key,
+                        message_id: message.message_id,
+                        body,
+                        thread_id: active.thread_id,
+                        expected_turn_id: active.codex_turn_id,
+                        accepted_at: now,
+                        submission_uncertain: false,
+                    };
+                    self.state.pending_steers.push(steer.clone());
+                    AcceptedAction::Steer(steer)
                 } else if self.state.queued_prompts.len() >= self.max_queued_prompts {
                     AcceptedAction::QueueFull
                 } else {
@@ -528,6 +581,14 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
     async fn handle_accepted_action(&mut self, action: AcceptedAction) {
         match action {
             AcceptedAction::StartQueuedPrompt => self.start_next_prompt().await,
+            AcceptedAction::Steer(steer) => self.submit_steer(steer).await,
+            AcceptedAction::ApprovalChoice(choice) => self.resolve_approval_choice(choice).await,
+            AcceptedAction::ApprovalInputBlocked => {
+                self.send(
+                    "[codex] An approval is displayed. Reply with one of its numbers, or /stop.",
+                )
+                .await;
+            }
             AcceptedAction::QueueFull => {
                 self.send("[codex] Queue is full; try again after the current turn.")
                     .await;
@@ -570,10 +631,6 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             BridgeCommand::WhatsAppListThreads => self.list_threads().await,
             BridgeCommand::WhatsAppAttach(token) => self.attach_thread(token).await,
             BridgeCommand::Help => self.send_help().await,
-            BridgeCommand::Approve { token, session } => {
-                self.approve_request(&token, session).await
-            }
-            BridgeCommand::Deny { token } => self.deny_request(&token).await,
             BridgeCommand::Answer { token: _, answer } if answer.len() > MAX_PROMPT_BYTES => {
                 self.send("[codex] That answer is too long; keep it under 10,000 UTF-8 bytes.")
                     .await;
@@ -721,6 +778,188 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
         }
     }
 
+    async fn submit_steer(&mut self, steer: PendingSteer) {
+        let Some(active) = self.state.active_turn.clone() else {
+            self.queue_steer_for_next_turn(&steer).await;
+            return;
+        };
+        if let Some(pending) = self
+            .state
+            .pending_steers
+            .iter_mut()
+            .find(|pending| pending.message_id == steer.message_id)
+        {
+            pending.submission_uncertain = true;
+        }
+        if self.state.save(&self.state_path).is_err() {
+            self.state_healthy = false;
+            self.refresh_readiness();
+            return;
+        }
+
+        let mut expected_turn_id = steer.expected_turn_id.clone();
+        let mut retried_after_mismatch = false;
+        loop {
+            match self
+                .codex
+                .steer_turn(
+                    active.thread_id.clone(),
+                    expected_turn_id.clone(),
+                    steer.message_id.clone(),
+                    steer.body.clone(),
+                )
+                .await
+            {
+                Ok(()) => {
+                    self.remove_pending_steer(&steer.message_id);
+                    let _ = self.state.save(&self.state_path);
+                    return;
+                }
+                Err(error) if error.is_no_active_turn() => {
+                    self.state.active_turn = None;
+                    self.queue_steer_for_next_turn(&steer).await;
+                    self.start_next_prompt().await;
+                    return;
+                }
+                Err(error) if error.is_non_steerable() => {
+                    self.queue_steer_for_next_turn(&steer).await;
+                    self.send("[codex] This turn cannot be steered; your message was queued for the next turn.")
+                        .await;
+                    return;
+                }
+                Err(CodexError::Transport(_)) => {
+                    self.app_server_connected = false;
+                    self.refresh_readiness();
+                    self.send("[codex] Steer submission is uncertain; it will be reconciled after reconnecting.")
+                        .await;
+                    return;
+                }
+                Err(error) if !retried_after_mismatch => {
+                    let Some(actual_turn_id) = error.actual_turn_id() else {
+                        self.queue_steer_for_next_turn(&steer).await;
+                        self.send("[codex] The message could not be steered; it was queued for the next turn.")
+                            .await;
+                        return;
+                    };
+                    expected_turn_id = actual_turn_id.clone();
+                    retried_after_mismatch = true;
+                    if let Some(pending) = self
+                        .state
+                        .pending_steers
+                        .iter_mut()
+                        .find(|pending| pending.message_id == steer.message_id)
+                    {
+                        pending.expected_turn_id = actual_turn_id.clone();
+                    }
+                    if let Some(active_turn) = self.state.active_turn.as_mut() {
+                        active_turn.codex_turn_id = actual_turn_id;
+                    }
+                    if self.state.save(&self.state_path).is_err() {
+                        self.state_healthy = false;
+                        self.refresh_readiness();
+                        return;
+                    }
+                }
+                Err(_) => {
+                    self.queue_steer_for_next_turn(&steer).await;
+                    self.send("[codex] The message could not be steered; it was queued for the next turn.")
+                        .await;
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn queue_steer_for_next_turn(&mut self, steer: &PendingSteer) {
+        self.remove_pending_steer(&steer.message_id);
+        self.state.queued_prompts.push(QueuedPrompt {
+            idempotency_key: steer.idempotency_key.clone(),
+            message_id: steer.message_id.clone(),
+            body: steer.body.clone(),
+            accepted_at: steer.accepted_at,
+            submission_uncertain: false,
+            failure_notified: false,
+        });
+        if self.state.save(&self.state_path).is_err() {
+            self.state_healthy = false;
+            self.refresh_readiness();
+        }
+    }
+
+    fn remove_pending_steer(&mut self, message_id: &str) {
+        self.state
+            .pending_steers
+            .retain(|pending| pending.message_id != message_id);
+    }
+
+    async fn requeue_pending_steers_for_turn(&mut self, thread_id: &str, turn_id: &str) {
+        let steers = self
+            .state
+            .pending_steers
+            .iter()
+            .filter(|steer| steer.thread_id == thread_id && steer.expected_turn_id == turn_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        for steer in steers {
+            self.queue_steer_for_next_turn(&steer).await;
+        }
+    }
+
+    async fn reconcile_pending_steers(&mut self, response: &ThreadResumeResponse) {
+        let pending = self.state.pending_steers.clone();
+        let mut changed = false;
+        for steer in pending {
+            let Some(turn) = response
+                .thread
+                .turns
+                .iter()
+                .find(|turn| turn.id == steer.expected_turn_id)
+            else {
+                let target_is_active = self.state.active_turn.as_ref().is_some_and(|active| {
+                    active.thread_id == steer.thread_id
+                        && active.codex_turn_id == steer.expected_turn_id
+                });
+                if !target_is_active {
+                    self.queue_steer_for_next_turn(&steer).await;
+                }
+                continue;
+            };
+            let accepted = turn.items.iter().any(|item| {
+                matches!(
+                    item,
+                    ThreadItem::UserMessage {
+                        client_id: Some(client_id),
+                        ..
+                    } if client_id == &steer.message_id
+                )
+            });
+            if accepted {
+                self.remove_pending_steer(&steer.message_id);
+                changed = true;
+            } else if turn.status != TurnStatus::InProgress {
+                self.queue_steer_for_next_turn(&steer).await;
+                changed = true;
+            }
+        }
+        if changed && self.state.save(&self.state_path).is_err() {
+            self.state_healthy = false;
+            self.refresh_readiness();
+        }
+    }
+
+    async fn retry_pending_steers(&mut self) {
+        let Some(active) = self.state.active_turn.clone() else {
+            return;
+        };
+        let pending = self.state.pending_steers.clone();
+        for steer in pending {
+            if steer.thread_id == active.thread_id && steer.expected_turn_id == active.codex_turn_id
+            {
+                self.submit_steer(steer).await;
+            }
+        }
+    }
+
     fn has_uncertain_turn_start(&self) -> bool {
         self.state.active_turn.is_none()
             && self
@@ -834,6 +1073,9 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
     }
 
     async fn stop_active_turn(&mut self) {
+        if self.pending_approvals.front().is_some() {
+            self.resolve_current_approval_for_stop().await;
+        }
         let Some(active_turn) = &self.state.active_turn else {
             self.send("[codex] No turn is running.").await;
             return;
@@ -847,7 +1089,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             .await
         {
             Ok(()) => self.send("[codex] Interrupt requested.").await,
-            Err(CodexError::Transport(_)) => {
+            Err(_) => {
                 self.app_server_connected = false;
                 self.refresh_readiness();
                 self.send("[codex] Could not interrupt the turn.").await;
@@ -939,8 +1181,11 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                     working_message_id,
                 )
                 .await;
+                self.requeue_pending_steers_for_turn(&completed.thread_id, &completed.turn.id)
+                    .await;
                 self.state.active_turn = None;
                 self.pending_requests.clear();
+                self.pending_approvals.clear();
                 self.file_change_paths.retain(|(thread_id, turn_id, _), _| {
                     thread_id != &completed.thread_id || turn_id != &completed.turn.id
                 });
@@ -966,6 +1211,15 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                     .await;
             }
             ServerNotification::ServerRequestResolved(resolved) => {
+                let was_front = self
+                    .pending_approvals
+                    .front()
+                    .is_some_and(|approval| approval.request_id() == &resolved.request_id);
+                self.pending_approvals
+                    .retain(|approval| approval.request_id() != &resolved.request_id);
+                if was_front {
+                    self.send_front_approval().await;
+                }
                 self.pending_requests
                     .retain(|_, request| request.request_id() != &resolved.request_id);
             }
@@ -1061,7 +1315,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
     }
 
     async fn handle_server_request(&mut self, request: ServerRequest) {
-        if self.pending_requests.len() >= MAX_PENDING_REQUESTS {
+        if self.pending_requests.len() + self.pending_approvals.len() >= MAX_PENDING_REQUESTS {
             let _ = self.codex.reject_server_request(request.id().clone()).await;
             self.send(
                 "[codex] Too many approval requests are pending; the newest request was rejected.",
@@ -1069,38 +1323,24 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             .await;
             return;
         }
-        let token = Uuid::new_v4().simple().to_string()[..8].to_string();
-        let expires_at = unix_timestamp().saturating_add(APPROVAL_TIMEOUT_SECONDS);
         match request {
             ServerRequest::CommandExecutionRequestApproval { request_id, params } => {
                 if !self.is_active_request(&params.thread_id, &params.turn_id) {
                     let _ = self.codex.reject_server_request(request_id).await;
                     return;
                 }
-                let command = params
-                    .command
-                    .unwrap_or_else(|| "an unknown command".to_string());
-                let reason = params.reason.unwrap_or_default();
-                self.pending_requests.insert(
-                    token.clone(),
-                    PendingRequest::Command {
-                        request_id,
-                        available_decisions: params.available_decisions,
-                        expires_at,
-                    },
-                );
-                self.send(&format!(
-                    "[codex] Approval {token}: run `{command}`{}{}\nReply `/approve {token}` or `/deny {token}`.",
-                    if reason.is_empty() { String::new() } else { format!(" ({reason})") },
-                    params.cwd.map_or_else(String::new, |cwd| format!(" in `{cwd}`")),
-                )).await;
+                let presentation = command_execution_presentation(&params);
+                self.enqueue_approval(PendingApproval::Command {
+                    request_id,
+                    presentation,
+                })
+                .await;
             }
             ServerRequest::FileChangeRequestApproval { request_id, params } => {
                 if !self.is_active_request(&params.thread_id, &params.turn_id) {
                     let _ = self.codex.reject_server_request(request_id).await;
                     return;
                 }
-                let reason = params.reason.unwrap_or_else(|| "file changes".to_string());
                 let paths = self
                     .file_change_paths
                     .get(&(
@@ -1109,20 +1349,18 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                         params.item_id.clone(),
                     ))
                     .filter(|paths| !paths.is_empty())
-                    .map_or_else(String::new, |paths| format!(" to {}", paths.join(", ")));
-                self.pending_requests.insert(
-                    token.clone(),
-                    PendingRequest::FileChange {
-                        request_id,
-                        expires_at,
-                    },
-                );
-                self.send(&format!(
-                    "[codex] Approval {token}: allow {reason}{paths}{}.\nReply `/approve {token}` or `/deny {token}`.",
-                    params.grant_root.map_or_else(String::new, |root| format!(" under `{}`", root.display())),
-                )).await;
+                    .cloned()
+                    .unwrap_or_default();
+                let presentation = file_change_presentation(&params, &paths);
+                self.enqueue_approval(PendingApproval::FileChange {
+                    request_id,
+                    presentation,
+                })
+                .await;
             }
             ServerRequest::ToolRequestUserInput { request_id, params } => {
+                let token = Uuid::new_v4().simple().to_string()[..8].to_string();
+                let expires_at = unix_timestamp().saturating_add(USER_INPUT_TIMEOUT_SECONDS);
                 if !self.is_active_request(&params.thread_id, &params.turn_id) {
                     let _ = self.codex.reject_server_request(request_id).await;
                     return;
@@ -1170,21 +1408,11 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                     let _ = self.codex.reject_server_request(request_id).await;
                     return;
                 }
-                let summary = serde_json::to_string(&params.permissions)
-                    .unwrap_or_else(|_| "additional access".to_string());
-                self.pending_requests.insert(
-                    token.clone(),
-                    PendingRequest::Permissions {
-                        request_id,
-                        permissions: params.permissions,
-                        expires_at,
-                    },
-                );
-                self.send(&format!(
-                    "[codex] Approval {token}: allow permissions {summary} for `{}`{}.\nReply `/approve {token}` or `/deny {token}`.",
-                    params.cwd.as_path().display(),
-                    params.reason.map_or_else(String::new, |reason| format!(" ({reason})")),
-                ))
+                let presentation = permissions_presentation(&params);
+                self.enqueue_approval(PendingApproval::Permissions {
+                    request_id,
+                    presentation,
+                })
                 .await;
             }
             request => {
@@ -1195,6 +1423,41 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
         }
     }
 
+    async fn enqueue_approval(&mut self, approval: PendingApproval) {
+        let display = self.pending_approvals.is_empty();
+        self.pending_approvals.push_back(approval);
+        if display {
+            self.send_front_approval().await;
+        }
+    }
+
+    async fn send_front_approval(&mut self) {
+        let Some(presentation) = self
+            .pending_approvals
+            .front()
+            .map(PendingApproval::presentation)
+            .cloned()
+        else {
+            return;
+        };
+        let mut lines = vec![format!("[codex] {}", presentation.title), String::new()];
+        lines.extend(presentation.details.iter().cloned());
+        if !presentation.details.is_empty() {
+            lines.push(String::new());
+        }
+        lines.extend(
+            presentation
+                .choices
+                .iter()
+                .enumerate()
+                .map(|(index, choice)| format!("{}. {}", index + 1, choice.label)),
+        );
+        lines.push(String::new());
+        let choice_count = presentation.choices.len();
+        lines.push(format!("Reply with 1-{choice_count}, or /stop."));
+        self.send(&lines.join("\n")).await;
+    }
+
     fn is_active_request(&self, thread_id: &str, turn_id: &str) -> bool {
         self.state
             .active_turn
@@ -1202,139 +1465,102 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             .is_some_and(|active| active.thread_id == thread_id && active.codex_turn_id == turn_id)
     }
 
-    async fn approve_request(&mut self, token: &str, session: bool) {
-        let Some(request) = self.pending_requests.get(token).cloned() else {
-            self.send("[codex] That approval token is unknown or expired.")
-                .await;
+    async fn resolve_approval_choice(&mut self, choice: usize) {
+        let Some(approval) = self.pending_approvals.front().cloned() else {
             return;
         };
-        let result = match request {
-            PendingRequest::Command {
-                request_id,
-                available_decisions,
-                ..
-            } => {
-                let decision = if session {
-                    CommandExecutionApprovalDecision::AcceptForSession
-                } else {
-                    CommandExecutionApprovalDecision::Accept
-                };
-                if available_decisions
-                    .as_ref()
-                    .is_some_and(|decisions| !decisions.contains(&decision))
-                {
-                    self.send("[codex] That approval scope is not available for this request.")
-                        .await;
-                    return;
-                }
-                serde_json::to_value(CommandExecutionRequestApprovalResponse { decision })
-                    .map(|result| (request_id, result))
-            }
-            PendingRequest::FileChange { request_id, .. } => {
-                let decision = if session {
-                    FileChangeApprovalDecision::AcceptForSession
-                } else {
-                    FileChangeApprovalDecision::Accept
-                };
-                serde_json::to_value(FileChangeRequestApprovalResponse { decision })
-                    .map(|result| (request_id, result))
-            }
-            PendingRequest::UserInput { .. } => {
-                self.send("[codex] Use `answer` for that token.").await;
-                return;
-            }
-            PendingRequest::Permissions {
-                request_id,
-                permissions,
-                ..
-            } => {
-                if session {
-                    self.send("[codex] Session-wide permission approval is not available for this request.")
-                        .await;
-                    return;
-                }
-                serde_json::to_value(PermissionsRequestApprovalResponse {
-                    permissions: GrantedPermissionProfile {
-                        network: permissions.network,
-                        file_system: permissions.file_system,
-                    },
-                    scope: PermissionGrantScope::Turn,
-                    strict_auto_review: None,
-                })
-                .map(|result| (request_id, result))
-            }
+        let Some(selected) = approval
+            .presentation()
+            .choices
+            .get(choice.saturating_sub(1))
+            .cloned()
+        else {
+            self.send("[codex] That approval number is not available. Reply with one of the displayed numbers, or /stop.").await;
+            return;
         };
-        if let Ok((request_id, result)) = result {
-            if self
-                .codex
-                .resolve_server_request(request_id, result)
-                .await
-                .is_ok()
-            {
-                self.pending_requests.remove(token);
-                self.send("[codex] Approved.").await;
-            } else {
-                self.send("[codex] Could not deliver that approval.").await;
-            }
-        }
+        self.resolve_approval(approval, selected.decision.clone())
+            .await;
     }
 
-    async fn deny_request(&mut self, token: &str) {
-        let Some(request) = self.pending_requests.get(token).cloned() else {
-            self.send("[codex] That approval token is unknown or expired.")
-                .await;
+    async fn resolve_current_approval_for_stop(&mut self) {
+        let Some(approval) = self.pending_approvals.front().cloned() else {
             return;
         };
-        let result = match request {
-            PendingRequest::Command {
-                request_id,
-                available_decisions,
-                ..
-            } => {
-                if available_decisions.as_ref().is_some_and(|decisions| {
-                    !decisions.contains(&CommandExecutionApprovalDecision::Decline)
-                }) {
-                    self.send("[codex] Decline is not available for this request.")
-                        .await;
-                    return;
-                }
-                serde_json::to_value(CommandExecutionRequestApprovalResponse {
-                    decision: CommandExecutionApprovalDecision::Decline,
-                })
-                .map(|result| (request_id, result))
-            }
-            PendingRequest::FileChange { request_id, .. } => {
-                serde_json::to_value(FileChangeRequestApprovalResponse {
-                    decision: FileChangeApprovalDecision::Decline,
-                })
-                .map(|result| (request_id, result))
-            }
-            PendingRequest::UserInput { .. } => {
-                self.send("[codex] Use `answer` for that token.").await;
-                return;
-            }
-            PendingRequest::Permissions { request_id, .. } => {
-                serde_json::to_value(PermissionsRequestApprovalResponse {
+        let decision =
+            match &approval {
+                PendingApproval::Command { presentation, .. } => presentation
+                    .choices
+                    .iter()
+                    .find_map(|choice| match &choice.decision {
+                        ApprovalDecision::Command(CommandExecutionApprovalDecision::Cancel) => {
+                            Some(choice.decision.clone())
+                        }
+                        _ => None,
+                    }),
+                PendingApproval::FileChange { .. } => Some(ApprovalDecision::FileChange(
+                    FileChangeApprovalDecision::Cancel,
+                )),
+                PendingApproval::Permissions { .. } => Some(ApprovalDecision::Permissions {
                     permissions: GrantedPermissionProfile::default(),
                     scope: PermissionGrantScope::Turn,
                     strict_auto_review: None,
-                })
-                .map(|result| (request_id, result))
-            }
-        };
-        if let Ok((request_id, result)) = result {
-            if self
-                .codex
-                .resolve_server_request(request_id, result)
-                .await
-                .is_ok()
-            {
-                self.pending_requests.remove(token);
-                self.send("[codex] Denied.").await;
-            } else {
-                self.send("[codex] Could not deliver that decision.").await;
-            }
+                }),
+            };
+        if let Some(decision) = decision {
+            self.resolve_approval(approval, decision).await;
         }
+    }
+
+    async fn resolve_approval(&mut self, approval: PendingApproval, decision: ApprovalDecision) {
+        let result = match &decision {
+            ApprovalDecision::Command(decision) => {
+                serde_json::to_value(CommandExecutionRequestApprovalResponse {
+                    decision: decision.clone(),
+                })
+            }
+            ApprovalDecision::FileChange(decision) => {
+                serde_json::to_value(FileChangeRequestApprovalResponse {
+                    decision: decision.clone(),
+                })
+            }
+            ApprovalDecision::Permissions {
+                permissions,
+                scope,
+                strict_auto_review,
+            } => serde_json::to_value(PermissionsRequestApprovalResponse {
+                permissions: permissions.clone(),
+                scope: *scope,
+                strict_auto_review: *strict_auto_review,
+            }),
+        };
+        let Ok(result) = result else {
+            self.send("[codex] Could not encode that approval decision.")
+                .await;
+            return;
+        };
+        if self
+            .codex
+            .resolve_server_request(approval.request_id().clone(), result)
+            .await
+            .is_err()
+        {
+            self.send("[codex] Could not deliver that approval decision.")
+                .await;
+            return;
+        }
+        self.pending_approvals
+            .retain(|pending| pending.request_id() != approval.request_id());
+        self.send(&format!(
+            "[codex] Selected: {}.",
+            approval
+                .presentation()
+                .choices
+                .iter()
+                .find(|choice| choice.decision == decision)
+                .map_or("the selected option", |choice| choice.label.as_str())
+        ))
+        .await;
+        self.send_front_approval().await;
     }
 
     async fn answer_request(&mut self, token: &str, answer: String) {
@@ -1347,12 +1573,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             request_id,
             question_id,
             ..
-        } = request
-        else {
-            self.send("[codex] Use `approve` or `deny` for that token.")
-                .await;
-            return;
-        };
+        } = request;
         let response = ToolRequestUserInputResponse {
             answers: HashMap::from([(
                 question_id,
@@ -1388,41 +1609,9 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             let Some(request) = self.pending_requests.remove(&token) else {
                 continue;
             };
-            let _ = match request {
-                PendingRequest::Command { request_id, .. } => {
-                    let result = serde_json::to_value(CommandExecutionRequestApprovalResponse {
-                        decision: CommandExecutionApprovalDecision::Decline,
-                    });
-                    match result {
-                        Ok(result) => self.codex.resolve_server_request(request_id, result).await,
-                        Err(_) => self.codex.reject_server_request(request_id).await,
-                    }
-                }
-                PendingRequest::FileChange { request_id, .. } => {
-                    let result = serde_json::to_value(FileChangeRequestApprovalResponse {
-                        decision: FileChangeApprovalDecision::Decline,
-                    });
-                    match result {
-                        Ok(result) => self.codex.resolve_server_request(request_id, result).await,
-                        Err(_) => self.codex.reject_server_request(request_id).await,
-                    }
-                }
-                PendingRequest::UserInput { request_id, .. } => {
-                    self.codex.reject_server_request(request_id).await
-                }
-                PendingRequest::Permissions { request_id, .. } => {
-                    let result = serde_json::to_value(PermissionsRequestApprovalResponse {
-                        permissions: GrantedPermissionProfile::default(),
-                        scope: PermissionGrantScope::Turn,
-                        strict_auto_review: None,
-                    });
-                    match result {
-                        Ok(result) => self.codex.resolve_server_request(request_id, result).await,
-                        Err(_) => self.codex.reject_server_request(request_id).await,
-                    }
-                }
-            };
-            self.send(&format!("[codex] Approval token {token} expired."))
+            let PendingRequest::UserInput { request_id, .. } = request;
+            let _ = self.codex.reject_server_request(request_id).await;
+            self.send(&format!("[codex] Question token {token} expired."))
                 .await;
         }
     }
@@ -1559,16 +1748,18 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             .active_turn
             .as_ref()
             .map_or("none", |turn| turn.codex_turn_id.as_str());
-        let pending =
-            self.pending_requests
-                .values()
-                .next()
-                .map_or("none", |request| match request {
-                    PendingRequest::Command { .. } => "command approval",
-                    PendingRequest::FileChange { .. } => "file-change approval",
-                    PendingRequest::UserInput { .. } => "user input",
-                    PendingRequest::Permissions { .. } => "permission approval",
-                });
+        let pending = if self.pending_approvals.is_empty() && self.pending_requests.is_empty() {
+            "none".to_string()
+        } else {
+            let mut kinds = Vec::new();
+            if !self.pending_approvals.is_empty() {
+                kinds.push(format!("{} approval", self.pending_approvals.len()));
+            }
+            if !self.pending_requests.is_empty() {
+                kinds.push(format!("{} user input", self.pending_requests.len()));
+            }
+            kinds.join(", ")
+        };
         format!(
             "[codex] app-server: {}; transport: {}; state: {}; thread: {thread}; active turn: {active_turn}; queued: {}; pending: {pending}",
             if self.app_server_connected {
@@ -1589,6 +1780,14 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             self.state.queued_prompts.len(),
         )
     }
+}
+
+fn parse_approval_choice(body: &str) -> Option<usize> {
+    let body = body.trim();
+    (!body.is_empty() && body.chars().all(|character| character.is_ascii_digit()))
+        .then(|| body.parse::<usize>().ok())
+        .flatten()
+        .filter(|choice| *choice > 0)
 }
 
 fn normalize_phone(value: &str) -> String {

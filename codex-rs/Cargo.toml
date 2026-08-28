@@ -108,6 +108,7 @@ members = [
     "utils/sandbox-summary",
     "utils/sleep-inhibitor",
     "utils/approval-presets",
+    "utils/approval-presentation",
     "utils/oss",
     "utils/output-truncation",
     "utils/path-utils",
@@ -243,6 +244,7 @@ codex-tui = { path = "tui" }
 codex-uds = { path = "uds" }
 codex-utils-absolute-path = { path = "utils/absolute-path" }
 codex-utils-approval-presets = { path = "utils/approval-presets" }
+codex-utils-approval-presentation = { path = "utils/approval-presentation" }
 codex-utils-cache = { path = "utils/cache" }
 codex-utils-cargo-bin = { path = "utils/cargo-bin" }
 codex-utils-cli = { path = "utils/cli" }

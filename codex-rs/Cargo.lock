@@ -4205,6 +4205,7 @@ dependencies = [
  "codex-state",
  "codex-terminal-detection",
  "codex-utils-absolute-path",
+ "codex-utils-approval-presentation",
  "codex-utils-approval-presets",
  "codex-utils-cargo-bin",
  "codex-utils-cli",
@@ -4299,6 +4300,14 @@ dependencies = [
  "serde_json",
  "tempfile",
  "ts-rs",
+]
+
+[[package]]
+name = "codex-utils-approval-presentation"
+version = "0.0.0"
+dependencies = [
+ "codex-app-server-protocol",
+ "pretty_assertions",
 ]
 
 [[package]]
@@ -4568,6 +4577,7 @@ dependencies = [
  "codex-app-server-protocol",
  "codex-config",
  "codex-utils-absolute-path",
+ "codex-utils-approval-presentation",
  "hmac 0.12.1",
  "pretty_assertions",
  "reqwest 0.12.28",

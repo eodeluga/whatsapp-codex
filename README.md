@@ -80,15 +80,30 @@ code. The page refreshes while pairing and then displays:
 
 Send `/status` in your WhatsApp self-chat. A ready installation reports the
 Codex app-server as connected and Baileys transport as healthy. Any other plain text, such
-as `Summarise the current project`, starts a normal Codex turn.
+as `Summarise the current project`, starts a normal Codex turn. WhatsApp is
+another input surface for that standard Codex CLI session: Codex continues to
+own thread history, model and workspace configuration, sandbox and permission
+profiles, approval policy and automatic review, approval decisions, turn
+execution, output, and completion.
 
-The terminal and WhatsApp use the same normal Codex history. WhatsApp also
-provides:
+The terminal and WhatsApp use the same normal Codex history. WhatsApp-specific
+behavior is limited to the transport and these bridge operations:
 
-- `/help` (or `/`) to display the configured WhatsApp and standard Codex
-  slash-command catalogue;
-- `/whatsapp list-threads` to list recent resumable Codex threads; and
-- `/whatsapp attach <thread-id>` to select one explicitly.
+- the private allowlisted WhatsApp self-chat transport;
+- `/help` (or `/`) to display the user-editable WhatsApp help catalogue;
+- `/status` for bridge, app-server, and transport health;
+- `/stop` as the WhatsApp text mapping for interrupt;
+- `/whatsapp list-threads` and `/whatsapp attach <thread-id>` for thread selection;
+- numbered plain-text selection for an active approval overlay; and
+- `/answer <token> <answer>` for the existing requested-user-input limitation.
+
+Plain text during an active steerable turn uses `turn/steer`. Approval choices
+have no user-visible IDs and are exactly the choices supplied by Codex. An
+automatic review may accept an action without showing a WhatsApp prompt;
+`Decline` lets the turn continue, while `Cancel` interrupts it. Reply with the
+displayed approval number, or `/stop`. `/approve`, `/approve-session`, and
+`/deny` are not WhatsApp controls, and the bridge does not advertise the
+general TUI slash-command set as implemented WhatsApp functionality.
 
 ## Configuration
 
@@ -108,7 +123,7 @@ URL, or Docker environment variable to configure.
 
 The gateway creates a user-editable command and display catalogue at
 `~/.codex/whatsapp/commands.json` the first time it starts. This file contains
-the WhatsApp controls, the standard Codex TUI slash commands, help headings and
+the implemented WhatsApp controls, approval guidance, help headings and
 footer, and the outbound response prefix. Editing it does not require rebuilding
 either binary or container: send `/help` to reload and display the catalogue.
 The catalogue controls discovery text only; it cannot enable a command that the

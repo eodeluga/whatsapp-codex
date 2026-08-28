@@ -307,56 +307,6 @@ fn collab_receiver_is_not_found(
     }
 }
 
-fn default_exec_approval_decisions(
-    network_approval_context: Option<&codex_app_server_protocol::NetworkApprovalContext>,
-    proposed_execpolicy_amendment: Option<&codex_app_server_protocol::ExecPolicyAmendment>,
-    proposed_network_policy_amendments: Option<
-        &[codex_app_server_protocol::NetworkPolicyAmendment],
-    >,
-    additional_permissions: Option<&codex_app_server_protocol::AdditionalPermissionProfile>,
-) -> Vec<codex_app_server_protocol::CommandExecutionApprovalDecision> {
-    use codex_app_server_protocol::CommandExecutionApprovalDecision;
-    use codex_app_server_protocol::NetworkPolicyRuleAction;
-
-    if network_approval_context.is_some() {
-        let mut decisions = vec![
-            CommandExecutionApprovalDecision::Accept,
-            CommandExecutionApprovalDecision::AcceptForSession,
-        ];
-        if let Some(amendment) = proposed_network_policy_amendments.and_then(|amendments| {
-            amendments
-                .iter()
-                .find(|amendment| amendment.action == NetworkPolicyRuleAction::Allow)
-        }) {
-            decisions.push(
-                CommandExecutionApprovalDecision::ApplyNetworkPolicyAmendment {
-                    network_policy_amendment: amendment.clone(),
-                },
-            );
-        }
-        decisions.push(CommandExecutionApprovalDecision::Cancel);
-        return decisions;
-    }
-
-    if additional_permissions.is_some() {
-        return vec![
-            CommandExecutionApprovalDecision::Accept,
-            CommandExecutionApprovalDecision::Cancel,
-        ];
-    }
-
-    let mut decisions = vec![CommandExecutionApprovalDecision::Accept];
-    if let Some(execpolicy_amendment) = proposed_execpolicy_amendment {
-        decisions.push(
-            CommandExecutionApprovalDecision::AcceptWithExecpolicyAmendment {
-                execpolicy_amendment: execpolicy_amendment.clone(),
-            },
-        );
-    }
-    decisions.push(CommandExecutionApprovalDecision::Cancel);
-    decisions
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AutoReviewMode {
     approval_policy: AskForApproval,
