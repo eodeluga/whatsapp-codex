@@ -11,10 +11,7 @@ fn plain_messages_are_prompts_and_standard_controls_are_recognized() {
     assert_eq!(parse_command("/"), BridgeCommand::Help);
     assert_eq!(
         parse_command("/approve abc"),
-        BridgeCommand::Approve {
-            token: "abc".to_string(),
-            session: false
-        }
+        BridgeCommand::Prompt("/approve abc".to_string())
     );
 }
 

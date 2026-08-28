@@ -9,7 +9,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use thiserror::Error;
 
-pub const STATE_SCHEMA_VERSION: u32 = 2;
+pub const STATE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -21,6 +21,8 @@ pub struct BridgeState {
     pub active_turn: Option<ActiveTurn>,
     #[serde(default)]
     pub queued_prompts: Vec<QueuedPrompt>,
+    #[serde(default)]
+    pub pending_steers: Vec<PendingSteer>,
     #[serde(default)]
     pub outbox: Vec<OutboundMessage>,
     #[serde(default)]
@@ -61,6 +63,19 @@ pub struct QueuedPrompt {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PendingSteer {
+    pub idempotency_key: String,
+    pub message_id: String,
+    pub body: String,
+    pub thread_id: String,
+    pub expected_turn_id: String,
+    pub accepted_at: u64,
+    #[serde(default)]
+    pub submission_uncertain: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OutboundMessage {
     pub response_id: String,
     pub chat_id: String,
@@ -92,11 +107,16 @@ impl BridgeState {
         match std::fs::read(path) {
             Ok(bytes) => {
                 set_path_private_permissions(path).map_err(|_| StateError::Read)?;
-                let state: Self = serde_json::from_slice(&bytes).map_err(|_| StateError::Parse)?;
-                if state.schema_version != STATE_SCHEMA_VERSION {
-                    return Err(StateError::UnsupportedSchema);
+                let mut state: Self =
+                    serde_json::from_slice(&bytes).map_err(|_| StateError::Parse)?;
+                match state.schema_version {
+                    STATE_SCHEMA_VERSION => Ok(state),
+                    2 => {
+                        state.schema_version = STATE_SCHEMA_VERSION;
+                        Ok(state)
+                    }
+                    _ => Err(StateError::UnsupportedSchema),
                 }
-                Ok(state)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::empty()),
             Err(_) => Err(StateError::Read),

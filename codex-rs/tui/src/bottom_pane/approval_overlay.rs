@@ -55,6 +55,8 @@ use codex_protocol::ThreadId;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_approval_presentation::ApprovalDecision as SharedApprovalDecision;
+use codex_utils_approval_presentation::command_execution_choices;
 use codex_utils_path_uri::LegacyAppPathString;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -830,84 +832,80 @@ fn exec_options(
     additional_permissions: Option<&AdditionalPermissionProfile>,
     keymap: &ApprovalKeymap,
 ) -> Vec<ApprovalOption> {
+    let shared_choices = command_execution_choices(
+        available_decisions,
+        network_approval_context,
+        additional_permissions,
+    );
     available_decisions
         .iter()
-        .filter_map(|decision| match decision {
-            CommandExecutionApprovalDecision::Accept => Some(ApprovalOption {
-                label: if network_approval_context.is_some() {
-                    "Yes, just this once".to_string()
-                } else {
-                    "Yes, proceed".to_string()
-                },
-                decision: ApprovalDecision::Command(CommandExecutionApprovalDecision::Accept),
-                shortcuts: keymap.approve.clone(),
-            }),
-            CommandExecutionApprovalDecision::AcceptWithExecpolicyAmendment {
-                execpolicy_amendment,
-            } => {
-                let rendered_prefix = strip_bash_lc_and_escape(&execpolicy_amendment.command);
-                if rendered_prefix.contains('\n') || rendered_prefix.contains('\r') {
-                    return None;
-                }
+        .filter_map(|decision| {
+            let choice = shared_choices.iter().find(|choice| {
+                matches!(
+                    &choice.decision,
+                    SharedApprovalDecision::Command(choice_decision)
+                        if choice_decision == decision
+                )
+            })?;
+            match decision {
+                CommandExecutionApprovalDecision::Accept => Some(ApprovalOption {
+                    label: choice.label.clone(),
+                    decision: ApprovalDecision::Command(CommandExecutionApprovalDecision::Accept),
+                    shortcuts: keymap.approve.clone(),
+                }),
+                CommandExecutionApprovalDecision::AcceptWithExecpolicyAmendment {
+                    execpolicy_amendment,
+                } => {
+                    let rendered_prefix = strip_bash_lc_and_escape(&execpolicy_amendment.command);
+                    if rendered_prefix.contains('\n') || rendered_prefix.contains('\r') {
+                        return None;
+                    }
 
-                Some(ApprovalOption {
-                    label: format!(
-                        "Yes, and don't ask again for commands that start with `{rendered_prefix}`"
-                    ),
+                    Some(ApprovalOption {
+                        label: choice.label.clone(),
+                        decision: ApprovalDecision::Command(
+                            CommandExecutionApprovalDecision::AcceptWithExecpolicyAmendment {
+                                execpolicy_amendment: execpolicy_amendment.clone(),
+                            },
+                        ),
+                        shortcuts: keymap.approve_for_prefix.clone(),
+                    })
+                }
+                CommandExecutionApprovalDecision::AcceptForSession => Some(ApprovalOption {
+                    label: choice.label.clone(),
                     decision: ApprovalDecision::Command(
-                        CommandExecutionApprovalDecision::AcceptWithExecpolicyAmendment {
-                            execpolicy_amendment: execpolicy_amendment.clone(),
-                        },
+                        CommandExecutionApprovalDecision::AcceptForSession,
                     ),
-                    shortcuts: keymap.approve_for_prefix.clone(),
-                })
+                    shortcuts: keymap.approve_for_session.clone(),
+                }),
+                CommandExecutionApprovalDecision::ApplyNetworkPolicyAmendment {
+                    network_policy_amendment,
+                } => {
+                    let shortcuts = match network_policy_amendment.action {
+                        NetworkPolicyRuleAction::Allow => keymap.approve_for_prefix.clone(),
+                        NetworkPolicyRuleAction::Deny => keymap.deny.clone(),
+                    };
+                    Some(ApprovalOption {
+                        label: choice.label.clone(),
+                        decision: ApprovalDecision::Command(
+                            CommandExecutionApprovalDecision::ApplyNetworkPolicyAmendment {
+                                network_policy_amendment: network_policy_amendment.clone(),
+                            },
+                        ),
+                        shortcuts,
+                    })
+                }
+                CommandExecutionApprovalDecision::Decline => Some(ApprovalOption {
+                    label: choice.label.clone(),
+                    decision: ApprovalDecision::Command(CommandExecutionApprovalDecision::Decline),
+                    shortcuts: keymap.deny.clone(),
+                }),
+                CommandExecutionApprovalDecision::Cancel => Some(ApprovalOption {
+                    label: choice.label.clone(),
+                    decision: ApprovalDecision::Command(CommandExecutionApprovalDecision::Cancel),
+                    shortcuts: keymap.decline.clone(),
+                }),
             }
-            CommandExecutionApprovalDecision::AcceptForSession => Some(ApprovalOption {
-                label: if network_approval_context.is_some() {
-                    "Yes, and allow this host for this conversation".to_string()
-                } else if additional_permissions.is_some() {
-                    "Yes, and allow these permissions for this session".to_string()
-                } else {
-                    "Yes, and don't ask again for this command in this session".to_string()
-                },
-                decision: ApprovalDecision::Command(
-                    CommandExecutionApprovalDecision::AcceptForSession,
-                ),
-                shortcuts: keymap.approve_for_session.clone(),
-            }),
-            CommandExecutionApprovalDecision::ApplyNetworkPolicyAmendment {
-                network_policy_amendment,
-            } => {
-                let (label, shortcuts) = match network_policy_amendment.action {
-                    NetworkPolicyRuleAction::Allow => (
-                        "Yes, and allow this host in the future".to_string(),
-                        keymap.approve_for_prefix.clone(),
-                    ),
-                    NetworkPolicyRuleAction::Deny => (
-                        "No, and block this host in the future".to_string(),
-                        keymap.deny.clone(),
-                    ),
-                };
-                Some(ApprovalOption {
-                    label,
-                    decision: ApprovalDecision::Command(
-                        CommandExecutionApprovalDecision::ApplyNetworkPolicyAmendment {
-                            network_policy_amendment: network_policy_amendment.clone(),
-                        },
-                    ),
-                    shortcuts,
-                })
-            }
-            CommandExecutionApprovalDecision::Decline => Some(ApprovalOption {
-                label: "No, continue without running it".to_string(),
-                decision: ApprovalDecision::Command(CommandExecutionApprovalDecision::Decline),
-                shortcuts: keymap.deny.clone(),
-            }),
-            CommandExecutionApprovalDecision::Cancel => Some(ApprovalOption {
-                label: "No, and tell Codex what to do differently".to_string(),
-                decision: ApprovalDecision::Command(CommandExecutionApprovalDecision::Cancel),
-                shortcuts: keymap.decline.clone(),
-            }),
         })
         .collect()
 }

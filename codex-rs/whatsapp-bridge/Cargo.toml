@@ -14,6 +14,7 @@ codex-app-server-client = { workspace = true }
 codex-app-server-protocol = { workspace = true }
 codex-config = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
+codex-utils-approval-presentation = { workspace = true }
 hmac = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }

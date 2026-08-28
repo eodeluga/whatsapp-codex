@@ -4,7 +4,7 @@ use codex_app_server_client::AppServerEvent;
 use codex_app_server_client::RemoteAppServerClient;
 use codex_app_server_client::RemoteAppServerConnectArgs;
 use codex_app_server_client::RemoteAppServerEndpoint;
-use codex_app_server_protocol::ApprovalsReviewer;
+use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
@@ -18,6 +18,8 @@ use codex_app_server_protocol::TurnInterruptParams;
 use codex_app_server_protocol::TurnInterruptResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
+use codex_app_server_protocol::TurnSteerParams;
+use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::sync::atomic::AtomicI64;
@@ -28,11 +30,64 @@ use thiserror::Error;
 pub enum CodexError {
     #[error("failed to communicate with Codex app-server: {0}")]
     Transport(String),
+    #[error("Codex app-server rejected the request: {message}")]
+    Server {
+        message: String,
+        data: Option<serde_json::Value>,
+    },
 }
 
 impl CodexError {
     fn transport(error: impl std::fmt::Display) -> Self {
         Self::Transport(error.to_string())
+    }
+
+    fn request(error: TypedRequestError) -> Self {
+        match error {
+            TypedRequestError::Server { source, .. } => Self::Server {
+                message: source.message,
+                data: source.data,
+            },
+            error => Self::transport(error),
+        }
+    }
+
+    pub(crate) fn is_no_active_turn(&self) -> bool {
+        matches!(self, Self::Server { message, .. } if message == "no active turn to steer")
+    }
+
+    pub(crate) fn actual_turn_id(&self) -> Option<String> {
+        let Self::Server { message, .. } = self else {
+            return None;
+        };
+        if let Some(actual) = message
+            .strip_prefix("expected active turn id `")
+            .and_then(|message| message.split_once("` but found `"))
+            .and_then(|(_, actual)| actual.strip_suffix('`'))
+        {
+            return Some(actual.to_string());
+        }
+        message
+            .strip_prefix("expected active turn id ")?
+            .split_once(" but found ")
+            .map(|(_, actual)| actual.to_string())
+    }
+
+    pub(crate) fn is_non_steerable(&self) -> bool {
+        let Self::Server {
+            data: Some(data), ..
+        } = self
+        else {
+            return false;
+        };
+        serde_json::from_value::<codex_app_server_protocol::TurnError>(data.clone())
+            .ok()
+            .is_some_and(|error| {
+                matches!(
+                    error.codex_error_info,
+                    Some(codex_app_server_protocol::CodexErrorInfo::ActiveTurnNotSteerable { .. })
+                )
+            })
     }
 }
 
@@ -64,6 +119,14 @@ pub trait CodexClient: Send {
         message_id: String,
         prompt: String,
     ) -> impl std::future::Future<Output = Result<String, CodexError>> + Send;
+
+    fn steer_turn(
+        &self,
+        thread_id: String,
+        turn_id: String,
+        message_id: String,
+        prompt: String,
+    ) -> impl std::future::Future<Output = Result<(), CodexError>> + Send;
 
     fn interrupt_turn(
         &self,
@@ -176,13 +239,12 @@ impl CodexClient for RemoteCodexClient {
             .request_typed(ClientRequest::ThreadStart {
                 request_id: self.request_id(),
                 params: ThreadStartParams {
-                    approvals_reviewer: Some(ApprovalsReviewer::User),
                     ephemeral: Some(false),
                     ..Default::default()
                 },
             })
             .await
-            .map_err(CodexError::transport)?;
+            .map_err(CodexError::request)?;
         Ok(response.thread.id)
     }
 
@@ -197,7 +259,7 @@ impl CodexClient for RemoteCodexClient {
                 },
             })
             .await
-            .map_err(CodexError::transport)?;
+            .map_err(CodexError::request)?;
         Ok(response)
     }
 
@@ -214,7 +276,7 @@ impl CodexClient for RemoteCodexClient {
                     model_providers: None,
                     source_kinds: None,
                     archived: None,
-                    is_pinned: None,
+                    section_id: None,
                     cwd: None,
                     use_state_db_only: false,
                     search_term: None,
@@ -223,7 +285,7 @@ impl CodexClient for RemoteCodexClient {
                 },
             })
             .await
-            .map_err(CodexError::transport)?;
+            .map_err(CodexError::request)?;
         Ok(response
             .data
             .into_iter()
@@ -255,8 +317,35 @@ impl CodexClient for RemoteCodexClient {
                 },
             })
             .await
-            .map_err(CodexError::transport)?;
+            .map_err(CodexError::request)?;
         Ok(response.turn.id)
+    }
+
+    async fn steer_turn(
+        &self,
+        thread_id: String,
+        turn_id: String,
+        message_id: String,
+        prompt: String,
+    ) -> Result<(), CodexError> {
+        let _: TurnSteerResponse = self
+            .client()?
+            .request_typed(ClientRequest::TurnSteer {
+                request_id: self.request_id(),
+                params: TurnSteerParams {
+                    thread_id,
+                    client_user_message_id: Some(message_id),
+                    input: vec![UserInput::Text {
+                        text: prompt,
+                        text_elements: Vec::new(),
+                    }],
+                    expected_turn_id: turn_id,
+                    ..Default::default()
+                },
+            })
+            .await
+            .map_err(CodexError::request)?;
+        Ok(())
     }
 
     async fn interrupt_turn(&self, thread_id: String, turn_id: String) -> Result<(), CodexError> {
@@ -267,7 +356,7 @@ impl CodexClient for RemoteCodexClient {
                 params: TurnInterruptParams { thread_id, turn_id },
             })
             .await
-            .map_err(CodexError::transport)?;
+            .map_err(CodexError::request)?;
         Ok(())
     }
 

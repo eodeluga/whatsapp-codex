@@ -55,3 +55,32 @@ fn rejects_unknown_state_schema_and_unknown_fields() {
     .unwrap();
     assert!(matches!(BridgeState::load(&path), Err(StateError::Parse)));
 }
+
+#[test]
+fn migrates_schema_two_without_changing_queued_prompt_meaning() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("state.json");
+    std::fs::write(
+        &path,
+        r#"{
+          "schemaVersion": 2,
+          "binding": null,
+          "activeTurn": null,
+          "queuedPrompts": [{
+            "idempotencyKey": "event-1",
+            "messageId": "message-1",
+            "body": "next turn",
+            "acceptedAt": 10
+          }],
+          "outbox": [],
+          "processedEvents": {},
+          "outboundMessageIds": {}
+        }"#,
+    )
+    .unwrap();
+
+    let state = BridgeState::load(&path).unwrap();
+    assert_eq!(state.schema_version, STATE_SCHEMA_VERSION);
+    assert_eq!(state.queued_prompts[0].body, "next turn");
+    assert!(state.pending_steers.is_empty());
+}

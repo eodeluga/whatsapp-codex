@@ -1,9 +1,12 @@
 # codex-whatsapp-bridge
 
-`codex-whatsapp-bridge` is the local transport between an allowlisted WhatsApp
-self-chat and Codex's standard app-server daemon. It forwards normal prompts,
-delivers Codex output, and maintains bounded durable delivery state. It does
-not own a workspace, agent loop, or separate Codex conversation.
+`codex-whatsapp-bridge` is another input surface for a standard Codex CLI
+session, carried over an allowlisted WhatsApp self-chat. Codex owns normal
+threads and conversation history, model and workspace configuration, sandbox
+and permission profiles, `approval_policy` and `approvals_reviewer` (including
+automatic review), approval decisions and scopes, turn execution, steering,
+interruption, output, and completion. The bridge does not create a second
+agent or turn-management model.
 
 For the complete source installation and user quickstart, see the repository
 [README](../../README.md).
@@ -26,12 +29,10 @@ The bridge reads the user-owned `[whatsapp]` table from Codex's normal
 session IDs, API keys, webhook URLs, or signing secrets manually.
 
 On first start, the bridge also creates the user-editable command catalogue at
-`CODEX_HOME/whatsapp/commands.json`. `/help` and `/` reload that file, so command
-descriptions, help grouping, footer text, and the outbound response prefix can
-be changed without rebuilding or restarting the bridge. The default catalogue
-contains both commands available through WhatsApp and the complete standard
-Codex TUI command reference. Catalogue entries are display metadata and do not
-alter command parsing, permissions, or execution.
+`CODEX_HOME/whatsapp/commands.json`. `/help` and `/` reload that file, so help
+grouping, footer text, approval guidance, and the outbound response prefix can
+be changed without rebuilding or restarting the bridge. Catalogue entries are
+display metadata and do not alter command parsing, permissions, or execution.
 
 ## Start the deployment
 
@@ -87,11 +88,32 @@ docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml \
 The bridge image compiles its own release binary. The repository
 `codex-rs/target/` directory is excluded from the Docker context.
 
-## Message behavior
+## Standard Codex behavior over WhatsApp
 
-Plain self-chat text starts a normal turn. Normal controls include `/new`,
-`/status`, and `/stop`; approvals and requested user input are returned through
-the same chat. Transport-specific thread selection uses:
+Plain self-chat text starts a normal turn when idle. During a steerable turn it
+is submitted through `turn/steer`, preserving arrival order. `/stop` interrupts
+the active turn, including while an approval is displayed. Approvals are the
+same decisions and scopes Codex supplies to the standard TUI, rendered as a
+numbered plain-text list with no user-visible approval ID. `Decline` continues
+the turn; `Cancel` interrupts it. Automatic review may accept an action without
+showing a WhatsApp prompt. Reply with the displayed number to resolve an
+approval, or `/stop`; arbitrary text is not interpreted as approval.
+
+The bridge-specific behavior is limited to:
+
+- the private allowlisted WhatsApp self-chat transport;
+- `/whatsapp list-threads` and `/whatsapp attach <thread-id>`;
+- `/status` for bridge, app-server, and transport health;
+- `/stop`, `/help`, and the user-editable WhatsApp help catalogue;
+- `/answer <token> <answer>` for the existing requested-user-input limitation;
+- `[codex]` response labelling, output chunking/editing, webhook deduplication,
+  durable delivery, reconnect handling, and health/pairing endpoints.
+
+The bridge does not implement or advertise the TUI-only approval retry flow or
+the general TUI slash-command set. `/approve`, `/approve-session`, and `/deny`
+are not bridge controls.
+
+Transport-specific thread selection uses:
 
 - `/whatsapp list-threads`;
 - `/whatsapp attach <thread-id>`.

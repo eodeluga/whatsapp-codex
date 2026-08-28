@@ -8,8 +8,6 @@ pub enum BridgeCommand {
     Stop,
     WhatsAppAttach(String),
     WhatsAppListThreads,
-    Approve { token: String, session: bool },
-    Deny { token: String },
     Answer { token: String, answer: String },
     Help,
 }
@@ -42,15 +40,7 @@ pub fn parse_command(message: &str) -> BridgeCommand {
 fn is_reserved_name(name: &str) -> bool {
     matches!(
         name,
-        "/approve"
-            | "/approve-session"
-            | "/deny"
-            | "/answer"
-            | "/help"
-            | "/new"
-            | "/status"
-            | "/stop"
-            | "/whatsapp"
+        "/answer" | "/help" | "/new" | "/status" | "/stop" | "/whatsapp"
     )
 }
 
@@ -59,15 +49,6 @@ fn parse_reserved(command: &str) -> Option<BridgeCommand> {
     let name = words.next()?;
     let token = words.next()?.to_string();
     match name {
-        "/approve" => Some(BridgeCommand::Approve {
-            token,
-            session: false,
-        }),
-        "/approve-session" => Some(BridgeCommand::Approve {
-            token,
-            session: true,
-        }),
-        "/deny" => Some(BridgeCommand::Deny { token }),
         "/answer" => Some(BridgeCommand::Answer {
             token,
             answer: words.next()?.to_string(),

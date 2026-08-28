@@ -8,8 +8,10 @@ fn default_catalog_is_valid_and_contains_both_command_surfaces() {
 
     let help = catalog.render_help();
     assert!(help.contains("`/whatsapp list-threads`"));
-    assert!(help.contains("`/model`"));
-    assert!(help.contains("`/debug-m-update`"));
+    assert!(help.contains("`/answer <token> <answer>`"));
+    assert!(help.contains("displayed number"));
+    assert!(!help.contains("/approve"));
+    assert!(!help.contains("/deny"));
 }
 
 #[test]

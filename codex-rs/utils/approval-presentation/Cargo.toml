@@ -1,0 +1,18 @@
+[package]
+name = "codex-utils-approval-presentation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+codex-app-server-protocol = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+
+[lib]
+test = true
+doctest = false
