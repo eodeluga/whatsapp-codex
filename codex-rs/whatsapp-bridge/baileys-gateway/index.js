@@ -1,4 +1,4 @@
-import makeWASocket, { Browsers, DisconnectReason, makeCacheableSignalKeyStore, useMultiFileAuthState } from "@whiskeysockets/baileys";
+import makeWASocket, { Browsers, DisconnectReason, downloadContentFromMessage, makeCacheableSignalKeyStore, toBuffer, useMultiFileAuthState } from "@whiskeysockets/baileys";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, readdir, rm } from "node:fs/promises";
 import http from "node:http";
@@ -24,9 +24,34 @@ const isAuthorised = (request, config) => {
   const expected = Buffer.from(config.transportApiToken);
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 };
+const unwrapMessageContent = (content) => {
+  let current = content ?? {};
+  for (const wrapper of ["ephemeralMessage", "viewOnceMessage", "viewOnceMessageV2", "viewOnceMessageV2Extension", "documentWithCaptionMessage"]) {
+    if (current[wrapper]?.message) current = current[wrapper].message;
+  }
+  return current;
+};
 const deliver = async (message, client) => {
   const config = await runtime();
-  const body = message.message?.conversation ?? message.message?.extendedTextMessage?.text ?? "";
+  const content = unwrapMessageContent(message.message);
+  const image = content.imageMessage;
+  const audio = content.audioMessage;
+  const document = content.documentMessage;
+  const video = content.videoMessage;
+  const body = content.conversation ?? content.extendedTextMessage?.text ?? image?.caption ?? document?.caption ?? video?.caption ?? "";
+  let attachment;
+  if (image) {
+    const media = await toBuffer(await downloadContentFromMessage(image, "image"));
+    attachment = { type: "image", mimeType: image.mimetype ?? "image/jpeg", dataBase64: media.toString("base64") };
+  } else if (audio) {
+    attachment = { type: "audio", mimeType: audio.mimetype ?? null };
+  } else if (video) {
+    attachment = { type: "unsupported", kind: "video attachment" };
+  } else if (document) {
+    attachment = { type: "unsupported", kind: "document attachment" };
+  } else if (content.stickerMessage) {
+    attachment = { type: "unsupported", kind: "sticker attachment" };
+  }
   const chatId = message.key.remoteJid;
   const fromMe = message.key.fromMe === true;
   const isGroup = chatId?.endsWith("@g.us") === true;
@@ -34,7 +59,7 @@ const deliver = async (message, client) => {
   const jidAddress = (jid) => jid?.split("@")[0]?.split(":")[0];
   const isSelfChat = fromMe && !isGroup && ownJids.some((jid) => jid === chatId || jidAddress(jid) === jidAddress(chatId));
   console.log(JSON.stringify({ event: "message.received", id: message.key.id, chatId, fromMe, isGroup, isSelfChat, hasText: body.length > 0 }));
-  const payload = JSON.stringify({ event: "message", idempotencyKey: message.key.id, data: { body, chatId, fromMe, id: message.key.id, isGroup, isSelfChat } });
+  const payload = JSON.stringify({ event: "message", idempotencyKey: message.key.id, data: { body, chatId, fromMe, id: message.key.id, isGroup, isSelfChat, attachment: attachment ?? null } });
   const signature = createHmac("sha256", config.webhookSigningSecret).update(payload).digest("hex");
   const response = await fetch(config.webhookUrl, { body: payload, headers: { "content-type": "application/json", "x-codex-transport-signature": `sha256=${signature}` }, method: "POST", signal: AbortSignal.timeout(10000) });
   console.log(JSON.stringify({ event: "message.delivered", id: message.key.id, status: response.status, accepted: response.ok }));

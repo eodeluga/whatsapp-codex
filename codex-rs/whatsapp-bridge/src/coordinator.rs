@@ -1,6 +1,7 @@
 //! Single-owner conversation state machine for the WhatsApp bridge.
 
 use crate::CommandCatalog;
+use crate::attachment::InboundAttachment;
 use crate::codex::CodexClient;
 use crate::codex::CodexError;
 use crate::commands::BridgeCommand;
@@ -9,7 +10,6 @@ use crate::health::BridgeReadiness;
 use crate::health::BridgeReadinessSnapshot;
 use crate::notifications::notification_thread_id;
 use crate::notifications::render_notification;
-use crate::notifications::render_server_request;
 use crate::notifications::server_request_thread_id;
 use crate::output::OutputAggregator;
 use crate::output::labelled_chunks;
@@ -36,6 +36,7 @@ use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ToolRequestUserInputAnswer;
 use codex_app_server_protocol::ToolRequestUserInputResponse;
 use codex_app_server_protocol::TurnStatus;
+use codex_app_server_protocol::UserInput;
 use codex_utils_approval_presentation::ApprovalDecision;
 use codex_utils_approval_presentation::ApprovalPresentation;
 use codex_utils_approval_presentation::command_execution_presentation;
@@ -68,6 +69,7 @@ pub enum CoordinatorCommand {
 
 enum AcceptedAction {
     Command(BridgeCommand),
+    UnsupportedAttachment(String),
     PromptTooLong,
     QueueFull,
     StartQueuedPrompt,
@@ -253,6 +255,10 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
         loop {
             if connected {
                 tokio::select! {
+                    // Keep inbound WhatsApp input ahead of the continuously-ready app-server
+                    // stream. This is the bridge equivalent of the TUI's immediate steer path:
+                    // a follow-up message must not wait behind a burst of protocol events.
+                    biased;
                     Some(command) = commands.recv() => {
                         if self.handle_command(command).await {
                             break;
@@ -297,6 +303,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                 }
             } else {
                 tokio::select! {
+                    biased;
                     Some(command) = commands.recv() => {
                         if self.handle_command(command).await {
                             break;
@@ -613,56 +620,73 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
         if self.state.was_sent_by_bridge(&message.message_id) {
             return Ok(None);
         }
-        let command = parse_command(&message.body);
+        let attachment = message.attachment;
+        let unsupported_attachment = match attachment.as_ref() {
+            Some(InboundAttachment::Audio { .. }) => Some("audio attachment".to_string()),
+            Some(InboundAttachment::Unsupported { kind }) => Some(kind.clone()),
+            None | Some(InboundAttachment::Image { .. }) => None,
+        };
+        let command = if attachment.is_some() {
+            BridgeCommand::Prompt(message.body.clone())
+        } else {
+            parse_command(&message.body)
+        };
         let previous_state = self.state.clone();
         let now = unix_timestamp();
         self.state
             .mark_processed(message.idempotency_key.clone(), now);
         self.state
             .prune(now, self.dedupe_ttl_hours, self.dedupe_capacity);
-        let action = match command {
-            BridgeCommand::Prompt(body) => {
-                if body.len() > MAX_PROMPT_BYTES {
-                    AcceptedAction::PromptTooLong
-                } else if self.pending_approvals.front().is_some() {
-                    if let Some(choice) = parse_approval_choice(&body) {
-                        AcceptedAction::ApprovalChoice(choice)
+        let action = match unsupported_attachment {
+            Some(kind) => AcceptedAction::UnsupportedAttachment(kind),
+            None => match command {
+                BridgeCommand::Prompt(body) => {
+                    if body.len() > MAX_PROMPT_BYTES {
+                        AcceptedAction::PromptTooLong
+                    } else if self.pending_approvals.front().is_some() {
+                        if attachment.is_none()
+                            && let Some(choice) = parse_approval_choice(&body)
+                        {
+                            AcceptedAction::ApprovalChoice(choice)
+                        } else {
+                            AcceptedAction::ApprovalInputBlocked
+                        }
+                    } else if self.state.pending_steers.len() >= self.max_queued_prompts {
+                        AcceptedAction::QueueFull
+                    } else if let Some(active) = self.state.active_turn.clone() {
+                        let steer = PendingSteer {
+                            idempotency_key: message.idempotency_key,
+                            message_id: message.message_id,
+                            body,
+                            attachment,
+                            thread_id: active.thread_id,
+                            expected_turn_id: active.codex_turn_id,
+                            accepted_at: now,
+                            submission_uncertain: false,
+                        };
+                        self.state.pending_steers.push(steer.clone());
+                        AcceptedAction::Steer(steer)
+                    } else if self.state.queued_prompts.len() >= self.max_queued_prompts {
+                        AcceptedAction::QueueFull
                     } else {
-                        AcceptedAction::ApprovalInputBlocked
+                        let prompt = QueuedPrompt {
+                            idempotency_key: message.idempotency_key,
+                            message_id: message.message_id,
+                            body,
+                            attachment,
+                            accepted_at: now,
+                            submission_uncertain: false,
+                            failure_notified: false,
+                        };
+                        self.state.queued_prompts.push(prompt);
+                        if self.state.active_turn.is_some() {
+                            return self.persist_accepted(previous_state, None);
+                        }
+                        AcceptedAction::StartQueuedPrompt
                     }
-                } else if self.state.pending_steers.len() >= self.max_queued_prompts {
-                    AcceptedAction::QueueFull
-                } else if let Some(active) = self.state.active_turn.clone() {
-                    let steer = PendingSteer {
-                        idempotency_key: message.idempotency_key,
-                        message_id: message.message_id,
-                        body,
-                        thread_id: active.thread_id,
-                        expected_turn_id: active.codex_turn_id,
-                        accepted_at: now,
-                        submission_uncertain: false,
-                    };
-                    self.state.pending_steers.push(steer.clone());
-                    AcceptedAction::Steer(steer)
-                } else if self.state.queued_prompts.len() >= self.max_queued_prompts {
-                    AcceptedAction::QueueFull
-                } else {
-                    let prompt = QueuedPrompt {
-                        idempotency_key: message.idempotency_key,
-                        message_id: message.message_id,
-                        body,
-                        accepted_at: now,
-                        submission_uncertain: false,
-                        failure_notified: false,
-                    };
-                    self.state.queued_prompts.push(prompt);
-                    if self.state.active_turn.is_some() {
-                        return self.persist_accepted(previous_state, None);
-                    }
-                    AcceptedAction::StartQueuedPrompt
                 }
-            }
-            command => AcceptedAction::Command(command),
+                command => AcceptedAction::Command(command),
+            },
         };
         self.persist_accepted(previous_state, Some(action))
     }
@@ -701,6 +725,15 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                     .await;
             }
             AcceptedAction::Command(command) => self.handle_bridge_command(command).await,
+            AcceptedAction::UnsupportedAttachment(kind) => {
+                if kind == "voice message" || kind == "audio attachment" {
+                    self.send("[codex] Audio and voice messages cannot be transcribed by the configured Codex model. Please send the words as a text message.")
+                        .await;
+                } else {
+                    self.send("[codex] This WhatsApp attachment cannot be used as Codex input. Send a text message or an image instead.")
+                        .await;
+                }
+            }
         }
     }
 
@@ -838,7 +871,11 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
         }
         match self
             .codex
-            .start_turn(thread_id.clone(), prompt.message_id.clone(), prompt.body)
+            .start_turn(
+                thread_id.clone(),
+                prompt.message_id.clone(),
+                user_inputs(prompt.body, prompt.attachment),
+            )
             .await
         {
             Ok(turn_id) => {
@@ -909,7 +946,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                     active.thread_id.clone(),
                     expected_turn_id.clone(),
                     steer.message_id.clone(),
-                    steer.body.clone(),
+                    user_inputs(steer.body.clone(), steer.attachment.clone()),
                 )
                 .await
             {
@@ -979,6 +1016,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             idempotency_key: steer.idempotency_key.clone(),
             message_id: steer.message_id.clone(),
             body: steer.body.clone(),
+            attachment: steer.attachment.clone(),
             accepted_at: steer.accepted_at,
             submission_uncertain: false,
             failure_notified: false,
@@ -1230,11 +1268,9 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
         {
             return;
         }
-        let rendered = render_notification(&notification);
         match notification {
             ServerNotification::AgentMessageDelta(delta) => {
                 if !self.is_active_request(&delta.thread_id, &delta.turn_id) {
-                    self.send(&rendered).await;
                     return;
                 }
                 let thread_id = delta.thread_id;
@@ -1267,7 +1303,6 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                             .collect(),
                     );
                 }
-                self.send(&rendered).await;
             }
             ServerNotification::ItemCompleted(completed) => {
                 if self.is_active_request(&completed.thread_id, &completed.turn_id)
@@ -1276,7 +1311,6 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                     self.output
                         .complete_item(completed.thread_id, completed.turn_id, id, text);
                 }
-                self.send(&rendered).await;
             }
             ServerNotification::TurnCompleted(completed) => {
                 let is_active = self.state.active_turn.as_ref().is_some_and(|active| {
@@ -1284,7 +1318,6 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                         && active.codex_turn_id == completed.turn.id
                 });
                 if !is_active {
-                    self.send(&rendered).await;
                     if self
                         .state
                         .active_turn
@@ -1295,7 +1328,6 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                     }
                     return;
                 }
-                self.send(&rendered).await;
                 let output = self
                     .output
                     .finish_turn(&completed.thread_id, &completed.turn.id);
@@ -1331,7 +1363,11 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                     self.start_next_prompt().await;
                 }
             }
-            ServerNotification::Error(_) => self.send(&rendered).await,
+            ServerNotification::Error(error) => {
+                if let Some(rendered) = render_notification(&ServerNotification::Error(error)) {
+                    self.send(&rendered).await;
+                }
+            }
             ServerNotification::ServerRequestResolved(resolved) => {
                 let was_front = self
                     .pending_approvals
@@ -1344,12 +1380,11 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                 }
                 self.pending_requests
                     .retain(|_, request| request.request_id() != &resolved.request_id);
-                self.send(&rendered).await;
             }
-            _ => {
-                // The serialized renderer is the intentional compatibility
-                // path for every notification not requiring coordinator state.
-                self.send(&rendered).await;
+            notification => {
+                if let Some(rendered) = render_notification(&notification) {
+                    self.send(&rendered).await;
+                }
             }
         }
     }
@@ -1452,16 +1487,12 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             let _ = self.codex.reject_server_request(request.id().clone()).await;
             return;
         }
-        let rendered = render_server_request(&request);
         if self.pending_requests.len() + self.pending_approvals.len() >= MAX_PENDING_REQUESTS {
             let _ = self.codex.reject_server_request(request.id().clone()).await;
-            self.send(&format!(
-                "{rendered}\n[codex] Too many interactive requests are pending; the newest request was rejected."
-            ))
-            .await;
+            self.send("[codex] Too many interactive requests are pending; the newest request was rejected.")
+                .await;
             return;
         }
-        self.send(&rendered).await;
         match request {
             ServerRequest::CommandExecutionRequestApproval { request_id, params } => {
                 if !self.is_active_request(&params.thread_id, &params.turn_id) {
@@ -1556,10 +1587,8 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             }
             request => {
                 let _ = self.codex.reject_server_request(request.id().clone()).await;
-                self.send(
-                    "[codex] This app-server request is not supported by the WhatsApp bridge; it was rejected after being surfaced above.",
-                )
-                .await;
+                self.send("[codex] This app-server request is not supported by the WhatsApp bridge; it was rejected.")
+                    .await;
             }
         }
     }
@@ -1921,6 +1950,27 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             self.state.queued_prompts.len(),
         )
     }
+}
+
+fn user_inputs(body: String, attachment: Option<InboundAttachment>) -> Vec<UserInput> {
+    let mut inputs = Vec::new();
+    if let Some(InboundAttachment::Image {
+        mime_type,
+        data_base64,
+    }) = attachment
+    {
+        inputs.push(UserInput::Image {
+            detail: None,
+            url: format!("data:{mime_type};base64,{data_base64}"),
+        });
+    }
+    if !body.is_empty() {
+        inputs.push(UserInput::Text {
+            text: body,
+            text_elements: Vec::new(),
+        });
+    }
+    inputs
 }
 
 fn parse_approval_choice(body: &str) -> Option<usize> {

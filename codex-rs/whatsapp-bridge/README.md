@@ -113,6 +113,14 @@ The bridge does not implement or advertise the TUI-only approval retry flow or
 the general TUI slash-command set. `/approve`, `/approve-session`, and `/deny`
 are not bridge controls.
 
+Attachments use the normal WhatsApp message flow. Image messages, with an
+optional caption, are passed to Codex as native image input. Audio and voice
+messages are rejected because the currently configured Codex models do not
+accept audio input for transcription. Video, document, and sticker messages
+are rejected because the app-server turn input has no generic video or file
+attachment type. The bridge does not inspect extensions or MIME types,
+transcode media, or perform transcription.
+
 Transport-specific thread selection uses:
 
 - `/whatsapp list-threads`;

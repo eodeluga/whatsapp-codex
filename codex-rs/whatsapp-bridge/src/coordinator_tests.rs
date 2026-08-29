@@ -1,14 +1,39 @@
 use super::*;
+use crate::attachment::InboundAttachment;
 use crate::codex::CodexClient;
 use crate::codex::CodexError;
 use crate::codex::ThreadSummary;
 use crate::transport::TransportError;
 use crate::transport::TransportStatus;
 use codex_app_server_protocol::ThreadResumeResponse;
+use codex_app_server_protocol::UserInput;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use tempfile::tempdir;
+
+#[test]
+fn image_attachment_is_encoded_as_codex_image_input() {
+    assert_eq!(
+        user_inputs(
+            "describe this".to_string(),
+            Some(InboundAttachment::Image {
+                mime_type: "image/png".to_string(),
+                data_base64: "aW1hZ2U=".to_string(),
+            }),
+        ),
+        vec![
+            UserInput::Image {
+                detail: None,
+                url: "data:image/png;base64,aW1hZ2U=".to_string(),
+            },
+            UserInput::Text {
+                text: "describe this".to_string(),
+                text_elements: Vec::new(),
+            },
+        ]
+    );
+}
 
 #[derive(Clone, Default)]
 struct FakeCodex {
@@ -38,8 +63,15 @@ impl CodexClient for FakeCodex {
         &self,
         thread_id: String,
         message_id: String,
-        prompt: String,
+        input: Vec<UserInput>,
     ) -> Result<String, CodexError> {
+        let prompt = input
+            .into_iter()
+            .find_map(|input| match input {
+                UserInput::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .unwrap_or_default();
         self.turns
             .lock()
             .unwrap()
@@ -52,8 +84,15 @@ impl CodexClient for FakeCodex {
         thread_id: String,
         turn_id: String,
         message_id: String,
-        prompt: String,
+        input: Vec<UserInput>,
     ) -> Result<(), CodexError> {
+        let prompt = input
+            .into_iter()
+            .find_map(|input| match input {
+                UserInput::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .unwrap_or_default();
         self.steers
             .lock()
             .unwrap()
@@ -162,6 +201,7 @@ async fn durable_deduplication_starts_one_turn_for_a_replayed_webhook() {
         message_id: "message-1".to_string(),
         chat_id: "447700900000@c.us".to_string(),
         body: "inspect the current project".to_string(),
+        attachment: None,
     };
 
     for _ in 0..2 {
@@ -264,6 +304,7 @@ async fn message_during_active_turn_uses_steer_without_queueing_a_second_turn() 
                 message_id: "message-steer".to_string(),
                 chat_id: "447700900000@c.us".to_string(),
                 body: "keep checking".to_string(),
+                attachment: None,
             },
             accepted,
         })
@@ -349,6 +390,7 @@ async fn help_reloads_the_user_command_catalog() {
                 message_id: "message-help".to_string(),
                 chat_id: "447700900000@c.us".to_string(),
                 body: "/help".to_string(),
+                attachment: None,
             },
             accepted,
         })
@@ -422,6 +464,7 @@ async fn app_server_retries_notify_once_for_a_queued_prompt() {
                 message_id: "message-1".to_string(),
                 chat_id: "447700900000@c.us".to_string(),
                 body: "inspect the current project".to_string(),
+                attachment: None,
             },
             accepted,
         })

@@ -1,5 +1,6 @@
 //! Durable, bounded bridge state.
 
+use crate::attachment::InboundAttachment;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -54,6 +55,8 @@ pub struct QueuedPrompt {
     pub idempotency_key: String,
     pub message_id: String,
     pub body: String,
+    #[serde(default)]
+    pub attachment: Option<InboundAttachment>,
     pub accepted_at: u64,
     #[serde(default)]
     pub submission_uncertain: bool,
@@ -67,6 +70,8 @@ pub struct PendingSteer {
     pub idempotency_key: String,
     pub message_id: String,
     pub body: String,
+    #[serde(default)]
+    pub attachment: Option<InboundAttachment>,
     pub thread_id: String,
     pub expected_turn_id: String,
     pub accepted_at: u64,

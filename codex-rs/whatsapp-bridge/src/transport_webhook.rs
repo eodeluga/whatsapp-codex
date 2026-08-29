@@ -1,5 +1,6 @@
 //! Signed, transport-neutral inbound event handling.
 
+use crate::attachment::InboundAttachment;
 use hmac::Hmac;
 use hmac::Mac;
 use serde::Deserialize;
@@ -26,6 +27,8 @@ pub struct TransportMessage {
     pub is_group: bool,
     #[serde(default)]
     pub is_self_chat: bool,
+    #[serde(default)]
+    pub attachment: Option<InboundAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +37,7 @@ pub struct InboundMessage {
     pub message_id: String,
     pub chat_id: String,
     pub body: String,
+    pub attachment: Option<InboundAttachment>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -65,7 +69,7 @@ pub fn filter_inbound(
         || message.is_group
         || !message.from_me
         || (!message.is_self_chat && message.chat_id != self_chat_id)
-        || message.body.is_empty()
+        || (message.body.is_empty() && message.attachment.is_none())
         || outbound_message_ids(&message.id)
     {
         return None;
@@ -75,6 +79,7 @@ pub fn filter_inbound(
         message_id: message.id,
         chat_id: message.chat_id,
         body: message.body,
+        attachment: message.attachment,
     })
 }
 
@@ -101,3 +106,7 @@ fn hex_decode(value: &str) -> Result<Vec<u8>, ()> {
         .map(|index| u8::from_str_radix(&value[index..index + 2], 16).map_err(|_| ()))
         .collect()
 }
+
+#[cfg(test)]
+#[path = "transport_webhook_tests.rs"]
+mod tests;

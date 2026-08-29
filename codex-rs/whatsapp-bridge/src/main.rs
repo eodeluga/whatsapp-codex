@@ -39,6 +39,8 @@ struct TransportState {
     bridge_name: String,
 }
 
+const MAX_WEBHOOK_BODY_BYTES: usize = 72 * 1024 * 1024;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt().with_target(false).try_init();
@@ -155,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/health/ready", get(health_ready))
         .route("/pairing", get(pairing_qr))
         .route("/webhooks/transport", post(transport_webhook))
-        .layer(DefaultBodyLimit::max(64 * 1024))
+        .layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES))
         .with_state(TransportState {
             secret: Arc::new(runtime.webhook_signing_secret.into_bytes()),
             self_chat_id,
