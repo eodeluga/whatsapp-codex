@@ -4573,6 +4573,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "codex-app-server-client",
  "codex-app-server-protocol",
  "codex-config",

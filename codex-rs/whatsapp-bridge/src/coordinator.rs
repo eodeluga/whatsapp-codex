@@ -7,6 +7,10 @@ use crate::commands::BridgeCommand;
 use crate::commands::parse_command;
 use crate::health::BridgeReadiness;
 use crate::health::BridgeReadinessSnapshot;
+use crate::notifications::notification_thread_id;
+use crate::notifications::render_notification;
+use crate::notifications::render_server_request;
+use crate::notifications::server_request_thread_id;
 use crate::output::OutputAggregator;
 use crate::output::labelled_chunks;
 use crate::state::BridgeState;
@@ -238,6 +242,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
         let mut recover_state = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut expire_requests = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut reconcile_turn_start = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut reconcile_active_turn = tokio::time::interval(std::time::Duration::from_secs(5));
         let transport_check_interval = LOCAL_RECOVERY_INTERVAL;
         let mut check_transport = tokio::time::interval_at(
             tokio::time::Instant::now() + transport_check_interval,
@@ -283,6 +288,9 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                     },
                     _ = reconcile_turn_start.tick(), if self.has_uncertain_turn_start() => {
                         self.reconcile_uncertain_turn_start().await;
+                    },
+                    _ = reconcile_active_turn.tick(), if self.state.active_turn.is_some() => {
+                        self.reconcile_active_turn().await;
                     },
                     _ = check_transport.tick() => self.check_transport().await,
                     else => break,
@@ -452,6 +460,101 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                 self.resume_failures = 0;
                 true
             }
+        }
+    }
+
+    async fn reconcile_active_turn(&mut self) {
+        let Some(active) = self.state.active_turn.clone() else {
+            return;
+        };
+        let Some(binding) = self.state.binding.clone() else {
+            self.state.active_turn = None;
+            if self.state.save(&self.state_path).is_err() {
+                self.state_healthy = false;
+                self.refresh_readiness();
+            }
+            self.send("[codex] Cleared stale active-turn state because no Codex thread was bound.")
+                .await;
+            return;
+        };
+        let response = match self.codex.resume_thread(binding.codex_thread_id).await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::debug!(%error, "active WhatsApp turn reconciliation failed");
+                return;
+            }
+        };
+        self.reconcile_pending_steers(&response).await;
+        self.retry_pending_steers().await;
+        let matching_turn = response
+            .thread
+            .turns
+            .iter()
+            .find(|turn| turn.id == active.codex_turn_id);
+        if let Some(turn) = matching_turn.filter(|turn| turn.status == TurnStatus::InProgress) {
+            for item in &turn.items {
+                if let ThreadItem::AgentMessage { id, text, .. } = item {
+                    self.output.complete_item(
+                        active.thread_id.clone(),
+                        active.codex_turn_id.clone(),
+                        id.clone(),
+                        text.clone(),
+                    );
+                }
+            }
+            return;
+        }
+
+        let recovered = matching_turn.map(|turn| {
+            let output = turn
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    ThreadItem::AgentMessage { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
+            (
+                turn.status.clone(),
+                turn.error.as_ref().map(|error| error.message.clone()),
+                output,
+            )
+        });
+        let request_ids = self
+            .pending_requests
+            .drain()
+            .map(|(_, request)| request.request_id().clone())
+            .chain(
+                self.pending_approvals
+                    .drain(..)
+                    .map(|approval| approval.request_id().clone()),
+            )
+            .collect::<Vec<_>>();
+        for request_id in request_ids {
+            let _ = self.codex.reject_server_request(request_id).await;
+        }
+        self.state.active_turn = None;
+        self.file_change_paths.retain(|(thread_id, turn_id, _), _| {
+            thread_id != &active.thread_id || turn_id != &active.codex_turn_id
+        });
+        self.stream_degraded = false;
+        self.last_edit_at = None;
+        self.live_edit_disabled = false;
+        if self.state.save(&self.state_path).is_err() {
+            self.state_healthy = false;
+            self.refresh_readiness();
+            return;
+        }
+        if let Some((status, error, output)) = recovered {
+            self.send("[codex] Recovered a turn that completed while the bridge was not receiving events.")
+                .await;
+            self.deliver_turn_output(status, error, output, None).await;
+        } else {
+            self.send("[codex] Cleared stale active-turn state; the previous turn was no longer present in Codex.")
+                .await;
+        }
+        if !self.state.queued_prompts.is_empty() {
+            self.advance_queue().await;
         }
     }
 
@@ -1104,8 +1207,12 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                 self.handle_server_request(request).await;
                 return;
             }
-            AppServerEvent::Lagged { .. } => {
+            AppServerEvent::Lagged { skipped } => {
                 self.stream_degraded = true;
+                self.send(&format!(
+                    "[codex] The app-server event stream skipped {skipped} event(s); reconciling the current turn."
+                ))
+                .await;
                 if !self.resume_after_reconnect().await {
                     self.app_server_connected = false;
                     self.refresh_readiness();
@@ -1114,9 +1221,20 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             }
             AppServerEvent::Disconnected { .. } => return,
         };
+        if let Some(thread_id) = notification_thread_id(&notification)
+            && self
+                .state
+                .binding
+                .as_ref()
+                .is_some_and(|binding| binding.codex_thread_id != thread_id)
+        {
+            return;
+        }
+        let rendered = render_notification(&notification);
         match notification {
             ServerNotification::AgentMessageDelta(delta) => {
                 if !self.is_active_request(&delta.thread_id, &delta.turn_id) {
+                    self.send(&rendered).await;
                     return;
                 }
                 let thread_id = delta.thread_id;
@@ -1149,6 +1267,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                             .collect(),
                     );
                 }
+                self.send(&rendered).await;
             }
             ServerNotification::ItemCompleted(completed) => {
                 if self.is_active_request(&completed.thread_id, &completed.turn_id)
@@ -1157,6 +1276,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                     self.output
                         .complete_item(completed.thread_id, completed.turn_id, id, text);
                 }
+                self.send(&rendered).await;
             }
             ServerNotification::TurnCompleted(completed) => {
                 let is_active = self.state.active_turn.as_ref().is_some_and(|active| {
@@ -1164,8 +1284,18 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                         && active.codex_turn_id == completed.turn.id
                 });
                 if !is_active {
+                    self.send(&rendered).await;
+                    if self
+                        .state
+                        .active_turn
+                        .as_ref()
+                        .is_some_and(|active| active.thread_id == completed.thread_id)
+                    {
+                        self.reconcile_active_turn().await;
+                    }
                     return;
                 }
+                self.send(&rendered).await;
                 let output = self
                     .output
                     .finish_turn(&completed.thread_id, &completed.turn.id);
@@ -1201,15 +1331,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                     self.start_next_prompt().await;
                 }
             }
-            ServerNotification::Error(error)
-                if !error.will_retry
-                    && self.state.active_turn.as_ref().is_some_and(|active| {
-                        active.thread_id == error.thread_id && active.codex_turn_id == error.turn_id
-                    }) =>
-            {
-                self.send(&format!("[codex] Codex error: {}", error.error.message))
-                    .await;
-            }
+            ServerNotification::Error(_) => self.send(&rendered).await,
             ServerNotification::ServerRequestResolved(resolved) => {
                 let was_front = self
                     .pending_approvals
@@ -1222,8 +1344,13 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                 }
                 self.pending_requests
                     .retain(|_, request| request.request_id() != &resolved.request_id);
+                self.send(&rendered).await;
             }
-            _ => {}
+            _ => {
+                // The serialized renderer is the intentional compatibility
+                // path for every notification not requiring coordinator state.
+                self.send(&rendered).await;
+            }
         }
     }
 
@@ -1315,14 +1442,26 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
     }
 
     async fn handle_server_request(&mut self, request: ServerRequest) {
+        if let Some(thread_id) = server_request_thread_id(&request)
+            && self
+                .state
+                .binding
+                .as_ref()
+                .is_some_and(|binding| binding.codex_thread_id != thread_id)
+        {
+            let _ = self.codex.reject_server_request(request.id().clone()).await;
+            return;
+        }
+        let rendered = render_server_request(&request);
         if self.pending_requests.len() + self.pending_approvals.len() >= MAX_PENDING_REQUESTS {
             let _ = self.codex.reject_server_request(request.id().clone()).await;
-            self.send(
-                "[codex] Too many approval requests are pending; the newest request was rejected.",
-            )
+            self.send(&format!(
+                "{rendered}\n[codex] Too many interactive requests are pending; the newest request was rejected."
+            ))
             .await;
             return;
         }
+        self.send(&rendered).await;
         match request {
             ServerRequest::CommandExecutionRequestApproval { request_id, params } => {
                 if !self.is_active_request(&params.thread_id, &params.turn_id) {
@@ -1417,8 +1556,10 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             }
             request => {
                 let _ = self.codex.reject_server_request(request.id().clone()).await;
-                self.send("[codex] Codex requested an unsupported approval.")
-                    .await;
+                self.send(
+                    "[codex] This app-server request is not supported by the WhatsApp bridge; it was rejected after being surfaced above.",
+                )
+                .await;
             }
         }
     }
