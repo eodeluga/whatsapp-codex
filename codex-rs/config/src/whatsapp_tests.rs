@@ -1,5 +1,6 @@
 use super::*;
 use pretty_assertions::assert_eq;
+use serde_json::json;
 use tempfile::tempdir;
 
 #[test]
@@ -58,4 +59,29 @@ fn user_loader_ignores_unrelated_config() {
     let config = load_user_whatsapp_config(&path).unwrap().unwrap();
     assert!(config.onboarding_complete);
     assert!(!config.enabled);
+}
+
+#[test]
+fn legacy_runtime_delivery_knobs_are_read_but_not_written() {
+    let runtime: WhatsAppRuntimeConfig = serde_json::from_value(json!({
+        "bridgeName": "WhatsApp",
+        "transportBaseUrl": "http://gateway",
+        "transportApiToken": "token",
+        "webhookSigningSecret": "secret",
+        "webhookUrl": "http://bridge/webhook",
+        "bridgeListen": "127.0.0.1:8787",
+        "statePath": "/tmp/state.json",
+        "maxQueuedPrompts": 20,
+        "outputChunkChars": 3500,
+        "editIntervalMs": 1500,
+        "dedupeCapacity": 100,
+        "dedupeTtlHours": 24
+    }))
+    .unwrap();
+
+    assert_eq!(runtime.output_chunk_chars, 3500);
+    assert_eq!(runtime.edit_interval_ms, 1500);
+    let serialized = serde_json::to_string(&runtime).unwrap();
+    assert!(!serialized.contains("outputChunkChars"));
+    assert!(!serialized.contains("editIntervalMs"));
 }

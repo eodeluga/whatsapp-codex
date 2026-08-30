@@ -124,6 +124,10 @@ Private runtime data is stored under `~/.codex/whatsapp/`. There is no
 WhatsApp-specific workspace, required input prefix, transport API token, webhook
 URL, or Docker environment variable to configure.
 
+Message limits and edit behavior are supplied by the WhatsApp adapter and
+durable delivery worker; the old runtime chunk/edit tuning fields are accepted
+only when reading an existing runtime file and are omitted when it is rewritten.
+
 The bridge keeps projected outbound transcript state in a private durable
 delivery journal beside its runtime state. It is used to resume pending sends
 after a bridge restart; normal transcript content is not stored in the user

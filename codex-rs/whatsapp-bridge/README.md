@@ -28,6 +28,9 @@ The bridge reads the user-owned `[whatsapp]` table from Codex's normal
 `CODEX_HOME/whatsapp/runtime.json`; durable transcript delivery is kept in a sibling
 private journal. Users must not create Baileys transport credentials,
 session IDs, API keys, webhook URLs, or signing secrets manually.
+Provider message limits and edit scheduling are adapter/worker capabilities;
+legacy runtime chunk and edit fields are read for compatibility but are not
+used or written by current bridge state.
 
 On first start, the bridge also creates the user-editable command catalogue at
 `CODEX_HOME/whatsapp/commands.json`. `/help` and `/` reload that file, so help
