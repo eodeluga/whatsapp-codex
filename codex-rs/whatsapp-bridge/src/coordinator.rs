@@ -60,7 +60,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 const MAX_PROMPT_BYTES: usize = 10_000;
-const MAX_OUTBOX_MESSAGES: usize = 100;
+const MAX_DELIVERY_QUEUE: usize = 100;
 const MAX_PENDING_REQUESTS: usize = 32;
 const USER_INPUT_TIMEOUT_SECONDS: u64 = 300;
 const MAX_FILE_CHANGE_ITEMS: usize = 128;
@@ -231,7 +231,7 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
     pub async fn run(mut self, mut commands: mpsc::Receiver<CoordinatorCommand>) {
         self.cleanup_stale_attachments();
         let (delivery, delivery_commands) =
-            DeliveryWorker::<O, FileDeliveryStore>::channel(MAX_OUTBOX_MESSAGES);
+            DeliveryWorker::<O, FileDeliveryStore>::channel(MAX_DELIVERY_QUEUE);
         let (delivery_events, mut delivery_event_rx) = mpsc::channel(128);
         let delivery_path = self.state_path.with_extension("delivery.json");
         let delivery_task = match DeliveryWorker::new(
@@ -282,9 +282,9 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                 },
             );
         }
-        let discarded_legacy_messages = self.state.outbox.len();
+        let discarded_legacy_messages = self.state.legacy_outbox.len();
         if discarded_legacy_messages > 0 {
-            self.state.outbox.clear();
+            self.state.legacy_outbox.clear();
             if self.state.save(&self.state_path).is_err() {
                 self.state_healthy = false;
                 self.refresh_readiness();
@@ -1046,7 +1046,7 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     inbound_message_id: prompt.message_id,
                     thread_id,
                     codex_turn_id: turn_id,
-                    working_output_message_id: None,
+                    legacy_working_output_message_id: None,
                     attachment_paths: prompt
                         .attachment
                         .as_ref()
@@ -1302,7 +1302,7 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     inbound_message_id: prompt.message_id,
                     thread_id: binding.codex_thread_id,
                     codex_turn_id: turn.id.clone(),
-                    working_output_message_id: None,
+                    legacy_working_output_message_id: None,
                     attachment_paths: prompt
                         .attachment
                         .as_ref()

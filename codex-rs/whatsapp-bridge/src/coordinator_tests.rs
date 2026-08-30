@@ -182,7 +182,7 @@ async fn user_input_questions_are_collected_in_order() {
         inbound_message_id: "message-1".to_string(),
         thread_id: "thread-1".to_string(),
         codex_turn_id: "turn-1".to_string(),
-        working_output_message_id: None,
+        legacy_working_output_message_id: None,
         attachment_paths: Vec::new(),
     });
     let (command_catalog, command_catalog_path) =
@@ -645,7 +645,7 @@ async fn message_during_active_turn_uses_steer_without_queueing_a_second_turn() 
         inbound_message_id: "message-1".to_string(),
         thread_id: "thread-1".to_string(),
         codex_turn_id: "turn-1".to_string(),
-        working_output_message_id: None,
+        legacy_working_output_message_id: None,
         attachment_paths: Vec::new(),
     });
     let readiness = Arc::new(BridgeReadiness::new(BridgeReadinessSnapshot {

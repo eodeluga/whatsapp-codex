@@ -84,3 +84,28 @@ fn migrates_schema_two_without_changing_queued_prompt_meaning() {
     assert_eq!(state.queued_prompts[0].body, "next turn");
     assert!(state.pending_steers.is_empty());
 }
+
+#[test]
+fn legacy_delivery_fields_are_read_but_not_written() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("state.json");
+    let mut state = BridgeState::empty();
+    state.legacy_outbox.push(OutboundMessage {
+        response_id: "response-1".to_string(),
+        chat_id: "chat".to_string(),
+        body: "legacy".to_string(),
+        attempts: 0,
+    });
+    state.active_turn = Some(ActiveTurn {
+        inbound_message_id: "message-1".to_string(),
+        thread_id: "thread-1".to_string(),
+        codex_turn_id: "turn-1".to_string(),
+        legacy_working_output_message_id: Some("message-1".to_string()),
+        attachment_paths: Vec::new(),
+    });
+    state.save(&path).unwrap();
+
+    let serialized = std::fs::read_to_string(&path).unwrap();
+    assert!(!serialized.contains("outbox"));
+    assert!(!serialized.contains("workingOutputMessageId"));
+}

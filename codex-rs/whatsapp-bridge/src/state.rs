@@ -25,8 +25,8 @@ pub struct BridgeState {
     pub queued_prompts: Vec<QueuedPrompt>,
     #[serde(default)]
     pub pending_steers: Vec<PendingSteer>,
-    #[serde(default)]
-    pub outbox: Vec<OutboundMessage>,
+    #[serde(rename = "outbox", default, skip_serializing)]
+    pub legacy_outbox: Vec<OutboundMessage>,
     #[serde(default)]
     pub processed_events: BTreeMap<String, u64>,
     #[serde(default)]
@@ -49,7 +49,8 @@ pub struct ActiveTurn {
     #[serde(default)]
     pub thread_id: String,
     pub codex_turn_id: String,
-    pub working_output_message_id: Option<String>,
+    #[serde(rename = "workingOutputMessageId", default, skip_serializing)]
+    pub legacy_working_output_message_id: Option<String>,
     #[serde(default)]
     pub attachment_paths: Vec<std::path::PathBuf>,
 }
