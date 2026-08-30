@@ -216,6 +216,43 @@ async fn worker_sends_uncommitted_revisions_without_edit_support() {
     task.await.unwrap();
 }
 
+#[tokio::test]
+async fn worker_does_not_send_internal_intents() {
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let adapter = FakeAdapter {
+        sent: Arc::clone(&sent),
+        edits: Arc::new(std::sync::Mutex::new(Vec::new())),
+        edit_support: true,
+    };
+    let (events, _event_rx) = tokio::sync::mpsc::channel(16);
+    let worker = DeliveryWorker::new(
+        adapter,
+        MemoryStore::default(),
+        events,
+        Duration::from_millis(1),
+    )
+    .await
+    .unwrap();
+    let (handle, command_rx) = DeliveryWorker::<FakeAdapter, MemoryStore>::channel(8);
+    let task = tokio::spawn(worker.run(command_rx));
+    handle
+        .apply(DeliveryIntent {
+            conversation_id: ProviderConversationId::new("chat"),
+            generation: 0,
+            key: TranscriptKey::new("thread", "turn", "internal"),
+            origin: EntryOrigin::Internal,
+            text: "diagnostic".to_string(),
+            revision: 1,
+            committed: true,
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(sent.lock().unwrap().is_empty());
+    handle.shutdown().await;
+    task.await.unwrap();
+}
+
 #[test]
 fn journal_records_generation_and_coalesced_revision_count() {
     let key = TranscriptKey::new("thread", "turn", "item");

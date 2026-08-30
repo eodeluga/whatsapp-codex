@@ -1576,6 +1576,9 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
         for event in projection {
             match event {
                 ProjectionEvent::Entry(entry) => {
+                    if entry.origin == codex_transcript::EntryOrigin::Internal {
+                        continue;
+                    }
                     let Some(text) = entry.plain_text() else {
                         continue;
                     };
@@ -1591,6 +1594,9 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     .await;
                 }
                 ProjectionEvent::Notice(notice) => {
+                    if notice.origin == codex_transcript::EntryOrigin::Internal {
+                        continue;
+                    }
                     if notice.text.trim().is_empty() {
                         continue;
                     }

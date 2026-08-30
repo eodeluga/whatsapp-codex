@@ -307,6 +307,10 @@ where
                     };
                     match command {
                         DeliveryWorkerCommand::Apply(intent) => {
+                            if intent.origin == EntryOrigin::Internal {
+                                tracing::debug!(key = ?intent.key, "suppressed internal delivery intent");
+                                continue;
+                            }
                             let key = intent.key.clone();
                             let capabilities = self.adapter.capabilities();
                             self.journal.apply(intent, capabilities.message_limit);
