@@ -310,11 +310,6 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
         let mut reconcile_turn_start = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut reconcile_active_turn = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut cleanup_attachments = tokio::time::interval(ATTACHMENT_RETENTION);
-        let transport_check_interval = LOCAL_RECOVERY_INTERVAL;
-        let mut check_transport = tokio::time::interval_at(
-            tokio::time::Instant::now() + transport_check_interval,
-            transport_check_interval,
-        );
         let mut connected = self.app_server_connected;
         let mut reconnect_delay = std::time::Duration::from_secs(1);
         loop {
@@ -368,7 +363,6 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     _ = reconcile_active_turn.tick(), if self.state.active_turn.is_some() => {
                         self.reconcile_active_turn().await;
                     },
-                    _ = check_transport.tick() => self.check_transport().await,
                     else => break,
                 }
             } else {
@@ -425,7 +419,6 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     _ = cleanup_attachments.tick() => {
                         self.cleanup_stale_attachments();
                     },
-                    _ = check_transport.tick() => self.check_transport().await,
                     else => break,
                 }
             }
@@ -439,23 +432,16 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
         self.readiness.mark_stopped();
     }
 
-    async fn check_transport(&mut self) {
-        let healthy = match TransportClient::status(&self.transport).await {
-            Ok(session) => {
-                session.status.eq_ignore_ascii_case("ready")
-                    && session
-                        .account
-                        .as_deref()
-                        .is_none_or(|phone| normalize_phone(phone) == self.configured_phone)
-            }
-            Err(_) => false,
-        };
-        self.transport_healthy = healthy;
-        self.refresh_readiness();
-    }
-
     fn handle_delivery_event(&mut self, event: DeliveryWorkerEvent) {
         match event {
+            DeliveryWorkerEvent::Status(status) => {
+                self.transport_healthy = status.ready
+                    && status
+                        .account
+                        .as_deref()
+                        .is_none_or(|phone| normalize_phone(phone) == self.configured_phone);
+                self.refresh_readiness();
+            }
             DeliveryWorkerEvent::Enqueued { key, queue_depth } => {
                 tracing::debug!(key = ?key, queue_depth, "transcript delivery queued");
             }

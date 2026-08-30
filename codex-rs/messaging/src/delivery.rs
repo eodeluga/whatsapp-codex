@@ -2,6 +2,7 @@ use crate::DeliveryIntent;
 use crate::ProviderAdapter;
 use crate::ProviderError;
 use crate::ProviderMessageId;
+use crate::ProviderStatus;
 use crate::segment_text;
 use codex_transcript::EntryOrigin;
 use codex_transcript::TranscriptKey;
@@ -200,6 +201,7 @@ pub enum DeliveryWorkerCommand {
 /// Observable worker events contain no message body or credentials.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeliveryWorkerEvent {
+    Status(ProviderStatus),
     Enqueued {
         key: TranscriptKey,
         queue_depth: usize,
@@ -292,6 +294,11 @@ where
     pub async fn run(mut self, mut commands: mpsc::Receiver<DeliveryWorkerCommand>) {
         let retry_delay = self.retry_delay.max(Duration::from_millis(1));
         let mut retry = tokio::time::interval(retry_delay);
+        let status_interval = Duration::from_secs(5);
+        let mut status_check = tokio::time::interval_at(
+            tokio::time::Instant::now() + status_interval,
+            status_interval,
+        );
         loop {
             tokio::select! {
                 command = commands.recv() => {
@@ -322,6 +329,13 @@ where
                     }
                 }
                 _ = retry.tick() => self.deliver_pending().await,
+                _ = status_check.tick() => {
+                    let status = self.adapter.status().await.unwrap_or(ProviderStatus {
+                        ready: false,
+                        account: None,
+                    });
+                    let _ = self.events.try_send(DeliveryWorkerEvent::Status(status));
+                }
             }
         }
     }
