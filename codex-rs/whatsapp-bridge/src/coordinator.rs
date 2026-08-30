@@ -9,10 +9,7 @@ use crate::commands::parse_command;
 use crate::health::BridgeReadiness;
 use crate::health::BridgeReadinessSnapshot;
 use crate::notifications::notification_thread_id;
-use crate::notifications::render_notification;
 use crate::notifications::server_request_thread_id;
-use crate::output::OutputAggregator;
-use crate::output::labelled_chunks;
 use crate::state::BridgeState;
 use crate::state::OutboundMessage;
 use crate::state::PendingSteer;
@@ -43,7 +40,7 @@ use codex_messaging::DeliveryWorkerHandle;
 use codex_messaging::FileDeliveryStore;
 use codex_messaging::ProviderAdapter;
 use codex_messaging::ProviderConversationId;
-use codex_protocol::models::MessagePhase;
+use codex_messaging::segment_text;
 use codex_transcript::ProjectionEvent;
 use codex_transcript::TranscriptProjector;
 use codex_utils_approval_presentation::ApprovalDecision;
@@ -151,15 +148,12 @@ pub struct Coordinator<C, O> {
     attachment_dir: PathBuf,
     configured_phone: String,
     self_chat_id: String,
-    output_chunk_chars: usize,
-    edit_interval: std::time::Duration,
     max_queued_prompts: usize,
     dedupe_capacity: usize,
     dedupe_ttl_hours: u64,
     command_catalog: CommandCatalog,
     command_catalog_path: PathBuf,
     projector: TranscriptProjector,
-    output: OutputAggregator,
     delivery: Option<DeliveryWorkerHandle>,
     file_change_paths: HashMap<(String, String, String), Vec<String>>,
     pending_requests: HashMap<String, PendingRequest>,
@@ -169,8 +163,6 @@ pub struct Coordinator<C, O> {
     transport_healthy: bool,
     readiness: Arc<BridgeReadiness>,
     stream_degraded: bool,
-    last_edit_at: Option<tokio::time::Instant>,
-    live_edit_disabled: bool,
     resume_failures: u8,
 }
 
@@ -184,8 +176,8 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
         attachment_dir: PathBuf,
         configured_phone: String,
         self_chat_id: String,
-        output_chunk_chars: usize,
-        edit_interval_ms: u64,
+        _output_chunk_chars: usize,
+        _edit_interval_ms: u64,
         max_queued_prompts: usize,
         dedupe_capacity: usize,
         dedupe_ttl_hours: u64,
@@ -203,15 +195,12 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             attachment_dir,
             configured_phone,
             self_chat_id,
-            output_chunk_chars,
-            edit_interval: std::time::Duration::from_millis(edit_interval_ms),
             max_queued_prompts,
             dedupe_capacity,
             dedupe_ttl_hours,
             command_catalog,
             command_catalog_path,
             projector: TranscriptProjector::default(),
-            output: OutputAggregator::default(),
             delivery: None,
             file_change_paths: HashMap::new(),
             pending_requests: HashMap::new(),
@@ -221,8 +210,6 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             transport_healthy,
             readiness,
             stream_degraded: false,
-            last_edit_at: None,
-            live_edit_disabled: false,
             resume_failures: 0,
         }
     }
@@ -519,39 +506,24 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     if let Some(turn) =
                         matching_turn.filter(|turn| turn.status == TurnStatus::InProgress)
                     {
-                        for item in &turn.items {
-                            if let ThreadItem::AgentMessage {
-                                id, text, phase, ..
-                            } = item
-                            {
-                                self.output.complete_item(
-                                    active.thread_id.clone(),
-                                    active.codex_turn_id.clone(),
-                                    id.clone(),
-                                    phase.clone(),
-                                    text.clone(),
-                                );
-                            }
-                        }
+                        let projection = self.projector.reconcile_items(
+                            &active.thread_id,
+                            &active.codex_turn_id,
+                            &turn.items,
+                        );
+                        self.enqueue_projection(projection).await;
                         return true;
                     }
                     let recovered = matching_turn.map(|turn| {
-                        let output = turn
-                            .items
-                            .iter()
-                            .filter_map(|item| match item {
-                                ThreadItem::AgentMessage {
-                                    text,
-                                    phase: None | Some(MessagePhase::FinalAnswer),
-                                    ..
-                                } => Some(text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<String>();
+                        let projection = self.projector.reconcile_items(
+                            &active.thread_id,
+                            &active.codex_turn_id,
+                            &turn.items,
+                        );
                         (
                             turn.status.clone(),
                             turn.error.as_ref().map(|error| error.message.clone()),
-                            output,
+                            projection,
                         )
                     });
                     self.state.active_turn = None;
@@ -561,16 +533,15 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                         self.refresh_readiness();
                         return false;
                     }
-                    if let Some((status, error, output)) = recovered {
-                        self.deliver_turn_output(
-                            status,
-                            error,
-                            output,
-                            active.working_output_message_id,
-                        )
-                        .await;
+                    if let Some((status, error, projection)) = recovered {
+                        self.enqueue_projection(projection).await;
+                        if matches!(status, TurnStatus::Failed)
+                            && let Some(error) = error
+                        {
+                            self.send(&error).await;
+                        }
                     } else {
-                        self.send("[codex] The previous turn ended while the bridge was disconnected; its final response could not be reconstructed.")
+                        self.send("[codex] The previous turn is no longer present in Codex.")
                             .await;
                     }
                 }
@@ -629,40 +600,25 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             .iter()
             .find(|turn| turn.id == active.codex_turn_id);
         if let Some(turn) = matching_turn.filter(|turn| turn.status == TurnStatus::InProgress) {
-            for item in &turn.items {
-                if let ThreadItem::AgentMessage {
-                    id, text, phase, ..
-                } = item
-                {
-                    self.output.complete_item(
-                        active.thread_id.clone(),
-                        active.codex_turn_id.clone(),
-                        id.clone(),
-                        phase.clone(),
-                        text.clone(),
-                    );
-                }
-            }
+            let projection = self.projector.reconcile_items(
+                &active.thread_id,
+                &active.codex_turn_id,
+                &turn.items,
+            );
+            self.enqueue_projection(projection).await;
             return;
         }
 
         let recovered = matching_turn.map(|turn| {
-            let output = turn
-                .items
-                .iter()
-                .filter_map(|item| match item {
-                    ThreadItem::AgentMessage {
-                        text,
-                        phase: None | Some(MessagePhase::FinalAnswer),
-                        ..
-                    } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<String>();
+            let projection = self.projector.reconcile_items(
+                &active.thread_id,
+                &active.codex_turn_id,
+                &turn.items,
+            );
             (
                 turn.status.clone(),
                 turn.error.as_ref().map(|error| error.message.clone()),
-                output,
+                projection,
             )
         });
         let request_ids = self
@@ -683,17 +639,18 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             thread_id != &active.thread_id || turn_id != &active.codex_turn_id
         });
         self.stream_degraded = false;
-        self.last_edit_at = None;
-        self.live_edit_disabled = false;
         if self.state.save(&self.state_path).is_err() {
             self.state_healthy = false;
             self.refresh_readiness();
             return;
         }
-        if let Some((status, error, output)) = recovered {
-            self.send("[codex] Recovered a turn that completed while the bridge was not receiving events.")
-                .await;
-            self.deliver_turn_output(status, error, output, None).await;
+        if let Some((status, error, projection)) = recovered {
+            self.enqueue_projection(projection).await;
+            if matches!(status, TurnStatus::Failed)
+                && let Some(error) = error
+            {
+                self.send(&error).await;
+            }
         } else {
             self.send("[codex] Cleared stale active-turn state; the previous turn was no longer present in Codex.")
                 .await;
@@ -1036,16 +993,6 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                 if self.state.save(&self.state_path).is_err() {
                     self.state_healthy = false;
                     self.refresh_readiness();
-                    return;
-                }
-                if let Some(message_id) = self.send_tracked("[codex] Working…").await {
-                    if let Some(active_turn) = self.state.active_turn.as_mut() {
-                        active_turn.working_output_message_id = Some(message_id);
-                    }
-                    if self.state.save(&self.state_path).is_err() {
-                        self.state_healthy = false;
-                        self.refresh_readiness();
-                    }
                 }
             }
             Err(_) => {
@@ -1304,37 +1251,21 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     self.refresh_readiness();
                     return;
                 }
-                if let Some(message_id) = self.send_tracked("[codex] Working…").await {
-                    if let Some(active) = self.state.active_turn.as_mut() {
-                        active.working_output_message_id = Some(message_id);
-                    }
-                    let _ = self.state.save(&self.state_path);
-                }
             } else {
-                let output = turn
-                    .items
-                    .iter()
-                    .filter_map(|item| match item {
-                        ThreadItem::AgentMessage {
-                            text,
-                            phase: None | Some(MessagePhase::FinalAnswer),
-                            ..
-                        } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<String>();
+                let projection =
+                    self.projector
+                        .reconcile_items(&binding.codex_thread_id, &turn.id, &turn.items);
                 if self.state.save(&self.state_path).is_err() {
                     self.state_healthy = false;
                     self.refresh_readiness();
                     return;
                 }
-                self.deliver_turn_output(
-                    turn.status.clone(),
-                    turn.error.as_ref().map(|error| error.message.clone()),
-                    output,
-                    None,
-                )
-                .await;
+                self.enqueue_projection(projection).await;
+                if matches!(turn.status, TurnStatus::Failed)
+                    && let Some(error) = turn.error.as_ref()
+                {
+                    self.send(&error.message).await;
+                }
                 if !self.state.queued_prompts.is_empty() {
                     self.start_next_prompt().await;
                 }
@@ -1434,21 +1365,48 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
         {
             tracing::trace!("suppressed app-server notification from provider output");
         }
-        match notification {
+        let should_enqueue = match &notification {
             ServerNotification::AgentMessageDelta(delta) => {
-                if !self.is_active_request(&delta.thread_id, &delta.turn_id) {
-                    return;
-                }
-                let thread_id = delta.thread_id;
-                let turn_id = delta.turn_id;
-                self.output.push_delta(
-                    thread_id.clone(),
-                    turn_id.clone(),
-                    delta.item_id,
-                    &delta.delta,
-                );
-                self.update_working_message(&thread_id, &turn_id).await;
+                self.is_active_request(&delta.thread_id, &delta.turn_id)
             }
+            ServerNotification::PlanDelta(delta) => {
+                self.is_active_request(&delta.thread_id, &delta.turn_id)
+            }
+            ServerNotification::ReasoningSummaryTextDelta(delta) => {
+                self.is_active_request(&delta.thread_id, &delta.turn_id)
+            }
+            ServerNotification::ReasoningTextDelta(delta) => {
+                self.is_active_request(&delta.thread_id, &delta.turn_id)
+            }
+            ServerNotification::CommandExecutionOutputDelta(delta) => {
+                self.is_active_request(&delta.thread_id, &delta.turn_id)
+            }
+            ServerNotification::FileChangeOutputDelta(delta) => {
+                self.is_active_request(&delta.thread_id, &delta.turn_id)
+            }
+            ServerNotification::FileChangePatchUpdated(delta) => {
+                self.is_active_request(&delta.thread_id, &delta.turn_id)
+            }
+            ServerNotification::ItemStarted(item) => {
+                self.is_active_request(&item.thread_id, &item.turn_id)
+            }
+            ServerNotification::ItemCompleted(item) => {
+                self.is_active_request(&item.thread_id, &item.turn_id)
+            }
+            ServerNotification::TurnCompleted(completed) => {
+                self.state.active_turn.as_ref().is_some_and(|active| {
+                    active.thread_id == completed.thread_id
+                        && active.codex_turn_id == completed.turn.id
+                })
+            }
+            _ => true,
+        };
+        if should_enqueue {
+            self.enqueue_projection(projection).await;
+        }
+        match notification {
+            ServerNotification::AgentMessageDelta(delta)
+                if !self.is_active_request(&delta.thread_id, &delta.turn_id) => {}
             ServerNotification::ItemStarted(started) => {
                 if self.is_active_request(&started.thread_id, &started.turn_id)
                     && self.file_change_paths.len() < MAX_FILE_CHANGE_ITEMS
@@ -1471,19 +1429,7 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                 }
             }
             ServerNotification::ItemCompleted(completed) => {
-                if self.is_active_request(&completed.thread_id, &completed.turn_id)
-                    && let ThreadItem::AgentMessage {
-                        id, text, phase, ..
-                    } = completed.item
-                {
-                    self.output.complete_item(
-                        completed.thread_id,
-                        completed.turn_id,
-                        id,
-                        phase,
-                        text,
-                    );
-                }
+                let _ = completed;
             }
             ServerNotification::TurnCompleted(completed) => {
                 let is_active = self.state.active_turn.as_ref().is_some_and(|active| {
@@ -1501,41 +1447,17 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     }
                     return;
                 }
-                for item in &completed.turn.items {
-                    if let ThreadItem::AgentMessage {
-                        id, text, phase, ..
-                    } = item
-                    {
-                        self.output.complete_item(
-                            completed.thread_id.clone(),
-                            completed.turn.id.clone(),
-                            id.clone(),
-                            phase.clone(),
-                            text.clone(),
-                        );
-                    }
-                }
-                let output = self
-                    .output
-                    .finish_turn(&completed.thread_id, &completed.turn.id);
-                let working_message_id = self
-                    .state
-                    .active_turn
-                    .as_ref()
-                    .and_then(|active| active.working_output_message_id.clone());
                 let attachment_paths = self
                     .state
                     .active_turn
                     .as_ref()
                     .map(|active| active.attachment_paths.clone())
                     .unwrap_or_default();
-                self.deliver_turn_output(
-                    completed.turn.status,
-                    completed.turn.error.map(|error| error.message),
-                    output,
-                    working_message_id,
-                )
-                .await;
+                if matches!(completed.turn.status, TurnStatus::Failed)
+                    && let Some(error) = completed.turn.error.map(|error| error.message)
+                {
+                    self.send(&error).await;
+                }
                 self.requeue_pending_steers_for_turn(&completed.thread_id, &completed.turn.id)
                     .await;
                 self.state.active_turn = None;
@@ -1545,8 +1467,6 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     thread_id != &completed.thread_id || turn_id != &completed.turn.id
                 });
                 self.stream_degraded = false;
-                self.last_edit_at = None;
-                self.live_edit_disabled = false;
                 if self.state.save(&self.state_path).is_err() {
                     self.state_healthy = false;
                     self.refresh_readiness();
@@ -1558,9 +1478,7 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                 }
             }
             ServerNotification::Error(error) => {
-                if let Some(rendered) = render_notification(&ServerNotification::Error(error)) {
-                    self.send(&rendered).await;
-                }
+                let _ = error;
             }
             ServerNotification::ServerRequestResolved(resolved) => {
                 let was_front = self
@@ -1575,106 +1493,67 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                 self.pending_requests
                     .retain(|_, request| request.request_id() != &resolved.request_id);
             }
-            notification => {
-                if let Some(rendered) = render_notification(&notification) {
-                    self.send(&rendered).await;
+            _ => {}
+        }
+    }
+
+    async fn enqueue_projection(&mut self, projection: Vec<ProjectionEvent>) {
+        for event in projection {
+            match event {
+                ProjectionEvent::Entry(entry) => {
+                    let Some(text) = entry.plain_text() else {
+                        continue;
+                    };
+                    self.enqueue_intent(DeliveryIntent {
+                        conversation_id: ProviderConversationId::new(self.self_chat_id.clone()),
+                        key: entry.key.clone(),
+                        origin: entry.origin,
+                        text,
+                        revision: entry.revision,
+                        committed: entry.committed,
+                    })
+                    .await;
                 }
+                ProjectionEvent::Notice(notice) => {
+                    if notice.text.trim().is_empty() {
+                        continue;
+                    }
+                    self.enqueue_intent(DeliveryIntent {
+                        conversation_id: ProviderConversationId::new(self.self_chat_id.clone()),
+                        key: codex_transcript::TranscriptKey::new(
+                            if notice.thread_id.is_empty() {
+                                "codex"
+                            } else {
+                                &notice.thread_id
+                            },
+                            if notice.turn_id.is_empty() {
+                                "notice"
+                            } else {
+                                &notice.turn_id
+                            },
+                            Uuid::new_v4().simple().to_string(),
+                        ),
+                        origin: notice.origin,
+                        text: notice.text,
+                        revision: 1,
+                        committed: true,
+                    })
+                    .await;
+                }
+                ProjectionEvent::Suppressed => {}
             }
         }
     }
 
-    async fn update_working_message(&mut self, thread_id: &str, turn_id: &str) {
-        if self.live_edit_disabled
-            || self
-                .last_edit_at
-                .is_some_and(|last| last.elapsed() < self.edit_interval)
-        {
+    async fn enqueue_intent(&mut self, intent: DeliveryIntent) {
+        if let Some(delivery) = &self.delivery {
+            if delivery.try_apply(intent).is_err() {
+                self.transport_healthy = false;
+                self.refresh_readiness();
+            }
             return;
         }
-        let Some(active) = self
-            .state
-            .active_turn
-            .as_ref()
-            .filter(|active| active.thread_id == thread_id && active.codex_turn_id == turn_id)
-        else {
-            return;
-        };
-        let Some(message_id) = active.working_output_message_id.clone() else {
-            return;
-        };
-        let text = self.output.turn_text(thread_id, turn_id);
-        let Some(chunk) = labelled_chunks(&text, self.output_chunk_chars)
-            .into_iter()
-            .next()
-            .filter(|_| text.chars().count() <= self.output_chunk_chars)
-        else {
-            self.live_edit_disabled = true;
-            return;
-        };
-        self.last_edit_at = Some(tokio::time::Instant::now());
-        if TransportClient::edit_text(
-            &self.transport,
-            self.self_chat_id.clone(),
-            message_id,
-            chunk,
-        )
-        .await
-        .is_err()
-        {
-            self.live_edit_disabled = true;
-        }
-    }
-
-    async fn deliver_turn_output(
-        &mut self,
-        status: TurnStatus,
-        error: Option<String>,
-        output: String,
-        working_message_id: Option<String>,
-    ) {
-        let final_text = match status {
-            TurnStatus::Completed if output.is_empty() => "[codex] Turn completed.".to_string(),
-            TurnStatus::Completed => output,
-            TurnStatus::Interrupted => "[codex] Turn interrupted.".to_string(),
-            TurnStatus::Failed => format!(
-                "[codex] Turn failed: {}",
-                error.unwrap_or_else(|| "unknown error".to_string())
-            ),
-            TurnStatus::InProgress => "[codex] Turn ended with an invalid status.".to_string(),
-        };
-        let mut chunks = if final_text.starts_with("[codex] ") {
-            vec![final_text]
-        } else {
-            labelled_chunks(&final_text, self.output_chunk_chars)
-        };
-        if self.stream_degraded {
-            chunks.push(
-                "[codex] Some streaming events were missed; completed output was reconstructed from authoritative events."
-                    .to_string(),
-            );
-        }
-        let mut chunks = chunks.into_iter();
-        let Some(first) = chunks.next() else {
-            return;
-        };
-        let edited = if let Some(message_id) = working_message_id {
-            TransportClient::edit_text(
-                &self.transport,
-                self.self_chat_id.clone(),
-                message_id,
-                first.clone(),
-            )
-            .await
-            .is_ok()
-        } else {
-            false
-        };
-        if !edited {
-            self.send(&first).await;
-        }
-        for chunk in chunks {
-            self.send(&chunk).await;
-        }
+        let _ = self.send_tracked(&intent.text).await;
     }
 
     async fn handle_server_request(&mut self, request: ServerRequest) {
@@ -2010,12 +1889,12 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
     }
 
     async fn send(&mut self, text: &str) {
-        if text.chars().count() <= 4_096 {
+        let message_limit = self.transport.capabilities().message_limit;
+        if text.chars().count() <= message_limit {
             let _ = self.send_tracked(text).await;
             return;
         }
-        let content = text.strip_prefix("[codex] ").unwrap_or(text);
-        for chunk in labelled_chunks(content, self.output_chunk_chars) {
+        for chunk in segment_text(text, message_limit) {
             let _ = self.send_tracked(&chunk).await;
         }
     }

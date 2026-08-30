@@ -125,6 +125,26 @@ impl TranscriptProjector {
         &self.entries
     }
 
+    /// Reconciles a resumed turn from its authoritative item list.
+    pub fn reconcile_items(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        items: &[ThreadItem],
+    ) -> Vec<ProjectionEvent> {
+        items
+            .iter()
+            .cloned()
+            .filter_map(|item| {
+                self.upsert(
+                    TranscriptKey::new(thread_id, turn_id, item.id().to_owned()),
+                    item,
+                    true,
+                )
+            })
+            .collect()
+    }
+
     fn apply_item_started(
         &mut self,
         notification: ItemStartedNotification,
