@@ -38,6 +38,7 @@ use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_messaging::DeliveryIntent;
 use codex_messaging::DeliveryWorker;
+use codex_messaging::DeliveryWorkerEvent;
 use codex_messaging::DeliveryWorkerHandle;
 use codex_messaging::FileDeliveryStore;
 use codex_messaging::ProviderAdapter;
@@ -231,7 +232,7 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
         self.cleanup_stale_attachments();
         let (delivery, delivery_commands) =
             DeliveryWorker::<O, FileDeliveryStore>::channel(MAX_OUTBOX_MESSAGES);
-        let (delivery_events, _delivery_event_rx) = mpsc::channel(128);
+        let (delivery_events, mut delivery_event_rx) = mpsc::channel(128);
         let delivery_path = self.state_path.with_extension("delivery.json");
         let delivery_task = match DeliveryWorker::new(
             self.transport.clone(),
@@ -345,6 +346,11 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                             }
                         },
                     },
+                    delivery_event = delivery_event_rx.recv() => {
+                        if let Some(delivery_event) = delivery_event {
+                            self.handle_delivery_event(delivery_event);
+                        }
+                    },
                     _ = recover_state.tick(), if !self.state_healthy => {
                         self.recover_state_storage();
                     },
@@ -369,6 +375,11 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     Some(command) = commands.recv() => {
                         if self.handle_command(command).await {
                             break;
+                        }
+                    },
+                    delivery_event = delivery_event_rx.recv() => {
+                        if let Some(delivery_event) = delivery_event {
+                            self.handle_delivery_event(delivery_event);
                         }
                     },
                     _ = tokio::time::sleep(reconnect_delay_with_jitter(reconnect_delay)) => {
@@ -439,6 +450,43 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
         };
         self.transport_healthy = healthy;
         self.refresh_readiness();
+    }
+
+    fn handle_delivery_event(&mut self, event: DeliveryWorkerEvent) {
+        match event {
+            DeliveryWorkerEvent::Enqueued { key, queue_depth } => {
+                tracing::debug!(key = ?key, queue_depth, "transcript delivery queued");
+            }
+            DeliveryWorkerEvent::Sent { key, segment } => {
+                tracing::debug!(key = ?key, segment, "transcript delivery sent");
+            }
+            DeliveryWorkerEvent::Edited {
+                key,
+                segment,
+                revisions,
+            } => {
+                tracing::debug!(
+                    key = ?key,
+                    segment,
+                    coalesced_revisions = revisions,
+                    "transcript delivery edited"
+                );
+            }
+            DeliveryWorkerEvent::Failed {
+                key,
+                segment,
+                error,
+            } => {
+                tracing::warn!(%error, key = ?key, segment, "transcript delivery failed");
+                self.transport_healthy = false;
+                self.refresh_readiness();
+            }
+            DeliveryWorkerEvent::StoreFailed => {
+                tracing::error!("transcript delivery journal persistence failed");
+                self.transport_healthy = false;
+                self.refresh_readiness();
+            }
+        }
     }
 
     fn cleanup_stale_attachments(&self) {
