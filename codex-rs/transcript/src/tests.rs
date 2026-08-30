@@ -10,7 +10,10 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ToolRequestUserInputOption;
 use codex_app_server_protocol::ToolRequestUserInputParams;
 use codex_app_server_protocol::ToolRequestUserInputQuestion;
+use codex_app_server_protocol::Turn;
+use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnError;
+use codex_app_server_protocol::TurnStatus;
 use codex_protocol::models::MessagePhase;
 use pretty_assertions::assert_eq;
 
@@ -150,6 +153,43 @@ fn retryable_errors_and_internal_lifecycle_are_suppressed() {
         thread_id: "thread-1".to_owned(),
     }));
     assert_eq!(lifecycle, vec![ProjectionEvent::Suppressed]);
+}
+
+#[test]
+fn terminal_turn_error_is_not_projected_twice() {
+    let mut projector = TranscriptProjector::default();
+    let error = TurnError {
+        message: "turn failed".to_owned(),
+        codex_error_info: None,
+        additional_details: None,
+    };
+    let first = projector.apply(ServerNotification::Error(ErrorNotification {
+        error: error.clone(),
+        will_retry: false,
+        thread_id: "thread-1".to_owned(),
+        turn_id: "turn-1".to_owned(),
+    }));
+    assert!(matches!(first.as_slice(), [ProjectionEvent::Notice(_)]));
+
+    let second = projector.apply(ServerNotification::TurnCompleted(
+        TurnCompletedNotification {
+            thread_id: "thread-1".to_owned(),
+            turn: Turn {
+                id: "turn-1".to_owned(),
+                items: Vec::new(),
+                items_view: Default::default(),
+                status: TurnStatus::Failed,
+                error: Some(error),
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+            },
+        },
+    ));
+    assert!(second.is_empty());
+
+    let replay = projector.record_turn_error("thread-1", "turn-1", "turn failed");
+    assert!(replay.is_none());
 }
 
 #[test]

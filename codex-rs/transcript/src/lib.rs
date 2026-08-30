@@ -20,6 +20,7 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ToolRequestUserInputParams;
+use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::WarningNotification;
 use std::collections::HashMap;
@@ -39,6 +40,7 @@ pub struct TranscriptProjector {
     entries: Vec<TranscriptEntry>,
     entry_indexes: HashMap<TranscriptKey, usize>,
     user_input_requests: HashMap<TranscriptKey, UserInputPresentation>,
+    error_notices: HashMap<TranscriptKey, String>,
     next_revision: u64,
 }
 
@@ -111,6 +113,7 @@ impl TranscriptProjector {
                     None => notification.summary,
                 };
                 vec![ProjectionEvent::Notice(TranscriptNotice {
+                    key: notice_key("deprecation", "", "", &text),
                     origin: EntryOrigin::CodexTranscript,
                     thread_id: String::new(),
                     turn_id: String::new(),
@@ -164,6 +167,30 @@ impl TranscriptProjector {
             .collect()
     }
 
+    /// Reconciles an authoritative turn, including a terminal error when one
+    /// is present. The same error is emitted only once even if the live error
+    /// notification and the completed turn both arrive.
+    pub fn reconcile_turn(&mut self, thread_id: &str, turn: &Turn) -> Vec<ProjectionEvent> {
+        let mut projection = self.reconcile_items(thread_id, &turn.id, &turn.items);
+        if let Some(error) = &turn.error
+            && let Some(event) = self.record_turn_error(thread_id, &turn.id, &error.message)
+        {
+            projection.push(event);
+        }
+        projection
+    }
+
+    /// Records a terminal turn error from authoritative state, returning no
+    /// event when that exact error was already projected.
+    pub fn record_turn_error(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        message: &str,
+    ) -> Option<ProjectionEvent> {
+        self.error_notice(thread_id, turn_id, message)
+    }
+
     fn apply_item_started(
         &mut self,
         notification: ItemStartedNotification,
@@ -201,22 +228,25 @@ impl TranscriptProjector {
         &mut self,
         notification: TurnCompletedNotification,
     ) -> Vec<ProjectionEvent> {
-        notification
-            .turn
+        let thread_id = notification.thread_id;
+        let turn = notification.turn;
+        let mut projection = turn
             .items
             .into_iter()
             .filter_map(|item| {
                 self.upsert(
-                    TranscriptKey::new(
-                        notification.thread_id.clone(),
-                        notification.turn.id.clone(),
-                        item.id().to_owned(),
-                    ),
+                    TranscriptKey::new(thread_id.clone(), turn.id.clone(), item.id().to_owned()),
                     item,
                     true,
                 )
             })
-            .collect()
+            .collect::<Vec<_>>();
+        if let Some(error) = turn.error
+            && let Some(event) = self.record_turn_error(&thread_id, &turn.id, &error.message)
+        {
+            projection.push(event);
+        }
+        projection
     }
 
     fn apply_text_delta(
@@ -391,21 +421,28 @@ impl TranscriptProjector {
         )
     }
 
-    fn apply_error(&self, notification: ErrorNotification) -> Vec<ProjectionEvent> {
+    fn apply_error(&mut self, notification: ErrorNotification) -> Vec<ProjectionEvent> {
         if notification.will_retry {
             tracing::debug!("suppressed retryable app-server error");
             return vec![ProjectionEvent::Suppressed];
         }
-        vec![ProjectionEvent::Notice(TranscriptNotice {
-            origin: EntryOrigin::CodexTranscript,
-            thread_id: notification.thread_id,
-            turn_id: notification.turn_id,
-            text: notification.error.message,
-        })]
+        self.error_notice(
+            &notification.thread_id,
+            &notification.turn_id,
+            &notification.error.message,
+        )
+        .into_iter()
+        .collect()
     }
 
     fn apply_warning(&self, notification: WarningNotification) -> Vec<ProjectionEvent> {
         vec![ProjectionEvent::Notice(TranscriptNotice {
+            key: notice_key(
+                "warning",
+                notification.thread_id.as_deref().unwrap_or_default(),
+                "",
+                &notification.message,
+            ),
             origin: EntryOrigin::CodexTranscript,
             thread_id: notification.thread_id.unwrap_or_default(),
             turn_id: String::new(),
@@ -418,6 +455,12 @@ impl TranscriptProjector {
         notification: GuardianWarningNotification,
     ) -> Vec<ProjectionEvent> {
         vec![ProjectionEvent::Notice(TranscriptNotice {
+            key: notice_key(
+                "guardian-warning",
+                &notification.thread_id,
+                "",
+                &notification.message,
+            ),
             origin: EntryOrigin::CodexTranscript,
             thread_id: notification.thread_id,
             turn_id: String::new(),
@@ -434,11 +477,36 @@ impl TranscriptProjector {
             None => notification.summary,
         };
         vec![ProjectionEvent::Notice(TranscriptNotice {
+            key: notice_key("config-warning", "", "", &text),
             origin: EntryOrigin::CodexTranscript,
             thread_id: String::new(),
             turn_id: String::new(),
             text,
         })]
+    }
+
+    fn error_notice(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        message: &str,
+    ) -> Option<ProjectionEvent> {
+        let key = TranscriptKey::new(thread_id, turn_id, "turn-error");
+        if self
+            .error_notices
+            .get(&key)
+            .is_some_and(|previous| previous == message)
+        {
+            return None;
+        }
+        self.error_notices.insert(key.clone(), message.to_owned());
+        Some(ProjectionEvent::Notice(TranscriptNotice {
+            key,
+            origin: EntryOrigin::CodexTranscript,
+            thread_id: thread_id.to_owned(),
+            turn_id: turn_id.to_owned(),
+            text: message.to_owned(),
+        }))
     }
 
     fn upsert(
@@ -473,6 +541,15 @@ impl TranscriptProjector {
         self.entries.push(entry.clone());
         Some(ProjectionEvent::Entry(Box::new(entry)))
     }
+}
+
+fn notice_key(kind: &str, thread_id: &str, turn_id: &str, text: &str) -> TranscriptKey {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    TranscriptKey::new(thread_id, turn_id, format!("{kind}:{hash:016x}"))
 }
 
 fn preserve_started_content(existing: &ThreadItem, started: ThreadItem) -> ThreadItem {

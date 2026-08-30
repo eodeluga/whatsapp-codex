@@ -144,6 +144,7 @@ fn non_empty(text: String) -> Option<String> {
 /// A user-visible notification which is not represented by a `ThreadItem`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptNotice {
+    pub key: TranscriptKey,
     pub origin: EntryOrigin,
     pub thread_id: String,
     pub turn_id: String,

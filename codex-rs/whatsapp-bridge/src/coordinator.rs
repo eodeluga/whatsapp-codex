@@ -577,26 +577,12 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     if let Some(turn) =
                         matching_turn.filter(|turn| turn.status == TurnStatus::InProgress)
                     {
-                        let projection = self.projector.reconcile_items(
-                            &active.thread_id,
-                            &active.codex_turn_id,
-                            &turn.items,
-                        );
+                        let projection = self.projector.reconcile_turn(&active.thread_id, turn);
                         self.enqueue_projection(projection).await;
                         return true;
                     }
-                    let recovered = matching_turn.map(|turn| {
-                        let projection = self.projector.reconcile_items(
-                            &active.thread_id,
-                            &active.codex_turn_id,
-                            &turn.items,
-                        );
-                        (
-                            turn.status.clone(),
-                            turn.error.as_ref().map(|error| error.message.clone()),
-                            projection,
-                        )
-                    });
+                    let recovered = matching_turn
+                        .map(|turn| self.projector.reconcile_turn(&active.thread_id, turn));
                     self.state.active_turn = None;
                     self.pending_requests.clear();
                     if self.state.save(&self.state_path).is_err() {
@@ -604,13 +590,8 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                         self.refresh_readiness();
                         return false;
                     }
-                    if let Some((status, error, projection)) = recovered {
+                    if let Some(projection) = recovered {
                         self.enqueue_projection(projection).await;
-                        if matches!(status, TurnStatus::Failed)
-                            && let Some(error) = error
-                        {
-                            self.send(&error).await;
-                        }
                     }
                 }
                 true
@@ -666,27 +647,13 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             .iter()
             .find(|turn| turn.id == active.codex_turn_id);
         if let Some(turn) = matching_turn.filter(|turn| turn.status == TurnStatus::InProgress) {
-            let projection = self.projector.reconcile_items(
-                &active.thread_id,
-                &active.codex_turn_id,
-                &turn.items,
-            );
+            let projection = self.projector.reconcile_turn(&active.thread_id, turn);
             self.enqueue_projection(projection).await;
             return;
         }
 
-        let recovered = matching_turn.map(|turn| {
-            let projection = self.projector.reconcile_items(
-                &active.thread_id,
-                &active.codex_turn_id,
-                &turn.items,
-            );
-            (
-                turn.status.clone(),
-                turn.error.as_ref().map(|error| error.message.clone()),
-                projection,
-            )
-        });
+        let recovered =
+            matching_turn.map(|turn| self.projector.reconcile_turn(&active.thread_id, turn));
         let request_ids = self
             .pending_requests
             .drain()
@@ -710,13 +677,8 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             self.refresh_readiness();
             return;
         }
-        if let Some((status, error, projection)) = recovered {
+        if let Some(projection) = recovered {
             self.enqueue_projection(projection).await;
-            if matches!(status, TurnStatus::Failed)
-                && let Some(error) = error
-            {
-                self.send(&error).await;
-            }
         }
         if !self.state.queued_prompts.is_empty() {
             self.advance_queue().await;
@@ -1316,20 +1278,15 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     return;
                 }
             } else {
-                let projection =
-                    self.projector
-                        .reconcile_items(&binding.codex_thread_id, &turn.id, &turn.items);
+                let projection = self
+                    .projector
+                    .reconcile_turn(&binding.codex_thread_id, turn);
                 if self.state.save(&self.state_path).is_err() {
                     self.state_healthy = false;
                     self.refresh_readiness();
                     return;
                 }
                 self.enqueue_projection(projection).await;
-                if matches!(turn.status, TurnStatus::Failed)
-                    && let Some(error) = turn.error.as_ref()
-                {
-                    self.send(&error.message).await;
-                }
                 if !self.state.queued_prompts.is_empty() {
                     self.start_next_prompt().await;
                 }
@@ -1517,11 +1474,6 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     .as_ref()
                     .map(|active| active.attachment_paths.clone())
                     .unwrap_or_default();
-                if matches!(completed.turn.status, TurnStatus::Failed)
-                    && let Some(error) = completed.turn.error.map(|error| error.message)
-                {
-                    self.send(&error).await;
-                }
                 self.requeue_pending_steers_for_turn(&completed.thread_id, &completed.turn.id)
                     .await;
                 self.state.active_turn = None;
@@ -1603,17 +1555,9 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                         conversation_id: ProviderConversationId::new(self.self_chat_id.clone()),
                         generation: self.delivery_generation,
                         key: codex_transcript::TranscriptKey::new(
-                            if notice.thread_id.is_empty() {
-                                "codex"
-                            } else {
-                                &notice.thread_id
-                            },
-                            if notice.turn_id.is_empty() {
-                                "notice"
-                            } else {
-                                &notice.turn_id
-                            },
-                            Uuid::new_v4().simple().to_string(),
+                            notice.key.thread_id.clone(),
+                            notice.key.turn_id.clone(),
+                            notice.key.item_id.clone(),
                         ),
                         origin: notice.origin,
                         text: notice.text,
