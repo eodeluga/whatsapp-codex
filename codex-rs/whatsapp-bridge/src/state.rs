@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use thiserror::Error;
 
-pub const STATE_SCHEMA_VERSION: u32 = 3;
+pub const STATE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -47,6 +47,8 @@ pub struct ActiveTurn {
     pub thread_id: String,
     pub codex_turn_id: String,
     pub working_output_message_id: Option<String>,
+    #[serde(default)]
+    pub attachment_paths: Vec<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +118,10 @@ impl BridgeState {
                     serde_json::from_slice(&bytes).map_err(|_| StateError::Parse)?;
                 match state.schema_version {
                     STATE_SCHEMA_VERSION => Ok(state),
+                    3 => {
+                        state.schema_version = STATE_SCHEMA_VERSION;
+                        Ok(state)
+                    }
                     2 => {
                         state.schema_version = STATE_SCHEMA_VERSION;
                         Ok(state)

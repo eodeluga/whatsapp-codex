@@ -1,11 +1,14 @@
 services:
   baileys-gateway:
     restart: unless-stopped
+    environment:
+      CODEX_WHATSAPP_ATTACHMENT_DIR: ${CODEX_HOME:-${HOME}/.codex}/whatsapp/attachments
     build:
       context: ../..
       dockerfile: whatsapp-bridge/baileys-gateway/Dockerfile
     volumes:
       - ${CODEX_HOME:-${HOME}/.codex}/whatsapp:/codex-home/whatsapp:ro
+      - ${CODEX_HOME:-${HOME}/.codex}/whatsapp/attachments:${CODEX_HOME:-${HOME}/.codex}/whatsapp/attachments
       - baileys-auth:/data/auth
     networks: [transport-egress]
     healthcheck:
@@ -22,6 +25,8 @@ services:
 
   codex-whatsapp-bridge:
     restart: unless-stopped
+    environment:
+      CODEX_WHATSAPP_ATTACHMENT_DIR: ${CODEX_HOME:-${HOME}/.codex}/whatsapp/attachments
     image: ${CODEX_WHATSAPP_BRIDGE_IMAGE:-codex-whatsapp-bridge:local}
     build:
       context: ../..
@@ -30,6 +35,7 @@ services:
     volumes:
       - ${CODEX_HOME:-${HOME}/.codex}/config.toml:/codex-home/config.toml:ro
       - ${CODEX_HOME:-${HOME}/.codex}/whatsapp:/codex-home/whatsapp
+      - ${CODEX_HOME:-${HOME}/.codex}/whatsapp/attachments:${CODEX_HOME:-${HOME}/.codex}/whatsapp/attachments
       - ${CODEX_HOME:-${HOME}/.codex}/app-server-control:/codex-home/app-server-control
     networks: [transport-egress]
     ports: ["127.0.0.1:8787:8787"]

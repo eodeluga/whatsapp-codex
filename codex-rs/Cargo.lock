@@ -4577,6 +4577,7 @@ dependencies = [
  "codex-app-server-client",
  "codex-app-server-protocol",
  "codex-config",
+ "codex-protocol",
  "codex-utils-absolute-path",
  "codex-utils-approval-presentation",
  "hmac 0.12.1",

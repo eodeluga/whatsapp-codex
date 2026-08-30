@@ -35,6 +35,63 @@ fn image_attachment_is_encoded_as_codex_image_input() {
     );
 }
 
+#[tokio::test]
+async fn audio_attachment_is_rejected_with_session_message() {
+    let directory = tempdir().unwrap();
+    let state_path = directory.path().join("state.json");
+    let codex = FakeCodex::default();
+    let recorded_turns = Arc::clone(&codex.turns);
+    let transport = FakeTransport::default();
+    let sent = Arc::clone(&transport.sent);
+    let (command_catalog, command_catalog_path) =
+        CommandCatalog::load_or_create(directory.path()).unwrap();
+    let readiness = Arc::new(BridgeReadiness::new(BridgeReadinessSnapshot {
+        ready: true,
+        state_healthy: true,
+        app_server_connected: true,
+        transport_healthy: true,
+    }));
+    let mut coordinator = Coordinator::new(
+        codex,
+        transport,
+        BridgeState::empty(),
+        state_path,
+        directory.path().join("attachments"),
+        "447700900000".to_string(),
+        "447700900000@c.us".to_string(),
+        3_500,
+        1_500,
+        20,
+        100,
+        24,
+        command_catalog,
+        command_catalog_path,
+        readiness,
+        true,
+        true,
+    );
+    let action = coordinator
+        .accept_inbound(InboundMessage {
+            idempotency_key: "event-audio".to_string(),
+            message_id: "message-audio".to_string(),
+            chat_id: "447700900000@c.us".to_string(),
+            body: String::new(),
+            attachment: Some(InboundAttachment::Unsupported {
+                kind: "audio attachment".to_string(),
+            }),
+        })
+        .unwrap()
+        .unwrap();
+
+    coordinator.handle_accepted_action(action).await;
+
+    assert!(recorded_turns.lock().unwrap().is_empty());
+    assert_eq!(
+        *sent.lock().unwrap(),
+        vec!["[codex] Audio attachments are unsupported in this session".to_string()]
+    );
+}
+
 #[derive(Clone, Default)]
 struct FakeCodex {
     turns: Arc<Mutex<Vec<(String, String, String)>>>,
@@ -166,6 +223,7 @@ impl TransportClient for FakeTransport {
 async fn durable_deduplication_starts_one_turn_for_a_replayed_webhook() {
     let directory = tempdir().unwrap();
     let state_path = directory.path().join("state.json");
+    let attachment_dir = directory.path().join("attachments");
     let codex = FakeCodex::default();
     let recorded_turns = Arc::clone(&codex.turns);
     let readiness = Arc::new(BridgeReadiness::new(BridgeReadinessSnapshot {
@@ -182,6 +240,7 @@ async fn durable_deduplication_starts_one_turn_for_a_replayed_webhook() {
         FakeTransport::default(),
         BridgeState::empty(),
         state_path.clone(),
+        attachment_dir,
         "447700900000".to_string(),
         "447700900000@c.us".to_string(),
         3_500,
@@ -255,6 +314,7 @@ async fn durable_deduplication_starts_one_turn_for_a_replayed_webhook() {
 async fn message_during_active_turn_uses_steer_without_queueing_a_second_turn() {
     let directory = tempdir().unwrap();
     let state_path = directory.path().join("state.json");
+    let attachment_dir = directory.path().join("attachments");
     let codex = FakeCodex::default();
     let recorded_steers = Arc::clone(&codex.steers);
     let mut state = BridgeState::empty();
@@ -267,6 +327,7 @@ async fn message_during_active_turn_uses_steer_without_queueing_a_second_turn() 
         thread_id: "thread-1".to_string(),
         codex_turn_id: "turn-1".to_string(),
         working_output_message_id: None,
+        attachment_paths: Vec::new(),
     });
     let readiness = Arc::new(BridgeReadiness::new(BridgeReadinessSnapshot {
         ready: true,
@@ -282,6 +343,7 @@ async fn message_during_active_turn_uses_steer_without_queueing_a_second_turn() 
         FakeTransport::default(),
         state,
         state_path.clone(),
+        attachment_dir,
         "447700900000".to_string(),
         "447700900000@c.us".to_string(),
         3_500,
@@ -337,6 +399,7 @@ async fn message_during_active_turn_uses_steer_without_queueing_a_second_turn() 
 async fn help_reloads_the_user_command_catalog() {
     let directory = tempdir().unwrap();
     let state_path = directory.path().join("state.json");
+    let attachment_dir = directory.path().join("attachments");
     let codex = FakeCodex::default();
     let transport = FakeTransport::default();
     let sent = Arc::clone(&transport.sent);
@@ -368,6 +431,7 @@ async fn help_reloads_the_user_command_catalog() {
         transport,
         BridgeState::empty(),
         state_path,
+        attachment_dir,
         "447700900000".to_string(),
         "447700900000@c.us".to_string(),
         3_500,
@@ -424,6 +488,7 @@ async fn help_reloads_the_user_command_catalog() {
 async fn app_server_retries_notify_once_for_a_queued_prompt() {
     let directory = tempdir().unwrap();
     let state_path = directory.path().join("state.json");
+    let attachment_dir = directory.path().join("attachments");
     let codex = FakeCodex::default();
     codex.start_thread_fails.store(true, Ordering::Release);
     let transport = FakeTransport::default();
@@ -442,6 +507,7 @@ async fn app_server_retries_notify_once_for_a_queued_prompt() {
         transport,
         BridgeState::empty(),
         state_path.clone(),
+        attachment_dir,
         "447700900000".to_string(),
         "447700900000@c.us".to_string(),
         3_500,

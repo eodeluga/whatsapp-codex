@@ -115,11 +115,12 @@ are not bridge controls.
 
 Attachments use the normal WhatsApp message flow. Image messages, with an
 optional caption, are passed to Codex as native image input. Audio and voice
-messages are rejected because the currently configured Codex models do not
-accept audio input for transcription. Video, document, and sticker messages
-are rejected because the app-server turn input has no generic video or file
-attachment type. The bridge does not inspect extensions or MIME types,
-transcode media, or perform transcription.
+messages are rejected with a user-facing unsupported message. Documents are
+stored in the shared attachment directory and Codex receives an internal context
+note with the file path; the note is not echoed to WhatsApp. Video and sticker
+messages remain unsupported. Attachment files are capped at 50 MiB for this
+experiment, retained while referenced by a turn, and removed after completion or
+by stale attachment cleanup. The bridge does not inspect document contents.
 
 Transport-specific thread selection uses:
 

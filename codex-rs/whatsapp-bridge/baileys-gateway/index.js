@@ -1,9 +1,12 @@
 import makeWASocket, { Browsers, DisconnectReason, downloadContentFromMessage, makeCacheableSignalKeyStore, toBuffer, useMultiFileAuthState } from "@whiskeysockets/baileys";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, readdir, rm } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rm, unlink } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
 import http from "node:http";
+import { join } from "node:path";
 import P from "pino";
 import QRCode from "qrcode";
+import { pipeline } from "node:stream/promises";
 
 let account;
 let qrCode;
@@ -12,6 +15,37 @@ let socket;
 let status = "starting";
 let connectionGeneration = 0;
 const runtime = async () => JSON.parse(await readFile("/codex-home/whatsapp/runtime.json", "utf8"));
+const attachmentDir = process.env.CODEX_WHATSAPP_ATTACHMENT_DIR ?? "/codex-home/whatsapp/attachments";
+const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+const safeAttachmentExtension = (fileName) => {
+  const extension = fileName?.match(/\.[A-Za-z0-9]{1,16}$/u)?.[0];
+  return extension ? extension.toLowerCase() : "";
+};
+const attachmentPath = (message, fileName) => {
+  const id = message.key.id.replace(/[^A-Za-z0-9_-]/gu, "_");
+  return join(attachmentDir, `${id}${safeAttachmentExtension(fileName)}`);
+};
+const downloadToFile = async (message, content, mediaType, fileName) => {
+  const path = attachmentPath(message, fileName);
+  await mkdir(attachmentDir, { recursive: true });
+  let bytes = 0;
+  const source = await downloadContentFromMessage(content, mediaType);
+  const limitedSource = async function* () {
+    for await (const chunk of source) {
+      bytes += chunk.length;
+      if (bytes > MAX_ATTACHMENT_BYTES) throw new Error("attachment exceeds the 50 MiB experiment limit");
+      yield chunk;
+    }
+  };
+  try {
+    await pipeline(limitedSource(), createWriteStream(path, { flags: "wx", mode: 0o644 }));
+    await chmod(path, 0o644);
+    return path;
+  } catch (error) {
+    await unlink(path).catch(() => {});
+    throw error;
+  }
+};
 const resetAuth = async () => {
   for (const entry of await readdir("/data/auth")) await rm(`/data/auth/${entry}`, { force: true, recursive: true });
   await mkdir("/data/auth", { recursive: true });
@@ -44,11 +78,12 @@ const deliver = async (message, client) => {
     const media = await toBuffer(await downloadContentFromMessage(image, "image"));
     attachment = { type: "image", mimeType: image.mimetype ?? "image/jpeg", dataBase64: media.toString("base64") };
   } else if (audio) {
-    attachment = { type: "audio", mimeType: audio.mimetype ?? null };
+    attachment = { type: "unsupported", kind: "audio attachment" };
   } else if (video) {
     attachment = { type: "unsupported", kind: "video attachment" };
   } else if (document) {
-    attachment = { type: "unsupported", kind: "document attachment" };
+    const path = await downloadToFile(message, document, "document", document.fileName);
+    attachment = { type: "document", fileName: document.fileName ?? null, mimeType: document.mimetype ?? null, path };
   } else if (content.stickerMessage) {
     attachment = { type: "unsupported", kind: "sticker attachment" };
   }
