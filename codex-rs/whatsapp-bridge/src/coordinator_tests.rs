@@ -17,6 +17,10 @@ use codex_messaging::ProviderConversationId;
 use codex_messaging::ProviderError;
 use codex_messaging::ProviderMessageId;
 use codex_messaging::ProviderStatus;
+use codex_transcript::EntryOrigin;
+use codex_transcript::ProjectionEvent;
+use codex_transcript::TranscriptEntry;
+use codex_transcript::TranscriptKey;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -269,6 +273,78 @@ async fn user_input_questions_are_collected_in_order() {
     let resolved = &resolves.lock().unwrap()[0];
     assert_eq!(resolved["answers"]["first"]["answers"][0], "one");
     assert_eq!(resolved["answers"]["second"]["answers"][0], "two");
+}
+
+#[tokio::test]
+async fn projected_codex_text_is_delivered_without_bridge_prefix() {
+    let directory = tempdir().unwrap();
+    let state_path = directory.path().join("state.json");
+    let transport = FakeTransport::default();
+    let sent = Arc::clone(&transport.sent);
+    let delivery_transport = transport.clone();
+    let (command_catalog, command_catalog_path) =
+        CommandCatalog::load_or_create(directory.path()).unwrap();
+    let readiness = Arc::new(BridgeReadiness::new(BridgeReadinessSnapshot {
+        ready: true,
+        state_healthy: true,
+        app_server_connected: true,
+        transport_healthy: true,
+    }));
+    let mut coordinator = Coordinator::new(
+        FakeCodex::default(),
+        transport,
+        BridgeState::empty(),
+        state_path,
+        directory.path().join("attachments"),
+        "447700900000".to_string(),
+        "447700900000@c.us".to_string(),
+        3_500,
+        1_500,
+        20,
+        100,
+        24,
+        command_catalog,
+        command_catalog_path,
+        readiness,
+        true,
+        true,
+    );
+    let (delivery_events, _delivery_event_rx) = mpsc::channel(16);
+    let delivery_worker = DeliveryWorker::new(
+        delivery_transport,
+        FileDeliveryStore::new(directory.path().join("delivery.json")),
+        delivery_events,
+        std::time::Duration::from_millis(1),
+    )
+    .await
+    .unwrap();
+    let (delivery, delivery_commands) =
+        DeliveryWorker::<FakeTransport, FileDeliveryStore>::channel(8);
+    coordinator.delivery = Some(delivery.clone());
+    let delivery_task = tokio::spawn(delivery_worker.run(delivery_commands));
+
+    coordinator
+        .enqueue_projection(vec![ProjectionEvent::Entry(Box::new(TranscriptEntry {
+            key: TranscriptKey::new("thread-1", "turn-1", "item-1"),
+            item: ThreadItem::AgentMessage {
+                id: "item-1".to_string(),
+                text: "plain Codex output".to_string(),
+                phase: None,
+                memory_citation: None,
+            },
+            origin: EntryOrigin::CodexTranscript,
+            revision: 1,
+            committed: true,
+        }))])
+        .await;
+    wait_for_sent(&sent, 1).await;
+
+    assert_eq!(
+        *sent.lock().unwrap(),
+        vec!["plain Codex output".to_string()]
+    );
+    delivery.shutdown().await;
+    delivery_task.await.unwrap();
 }
 
 async fn wait_for_sent(sent: &Arc<Mutex<Vec<String>>>, count: usize) {
