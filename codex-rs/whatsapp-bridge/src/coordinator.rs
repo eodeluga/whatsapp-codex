@@ -248,6 +248,8 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             }
             Err(error) => {
                 tracing::error!(%error, "failed to load the durable delivery journal");
+                self.state_healthy = false;
+                self.refresh_readiness();
                 None
             }
         };
@@ -1642,7 +1644,9 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             }
             return;
         }
-        let _ = self.send_tracked(&intent.text).await;
+        tracing::error!(key = ?intent.key, "transcript delivery worker is unavailable");
+        self.state_healthy = false;
+        self.refresh_readiness();
     }
 
     async fn handle_server_request(&mut self, request: ServerRequest) {
@@ -2113,14 +2117,10 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             }
             return None;
         }
-        if self.state.outbox.len() >= MAX_OUTBOX_MESSAGES {
-            self.transport_healthy = false;
-            self.refresh_readiness();
-            return None;
-        }
-        TransportClient::send_text(&self.transport, self.self_chat_id.clone(), text)
-            .await
-            .ok()
+        tracing::error!("bridge notice delivery worker is unavailable");
+        self.state_healthy = false;
+        self.refresh_readiness();
+        None
     }
 
     fn recover_state_storage(&mut self) {

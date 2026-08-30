@@ -9,6 +9,8 @@ use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ToolRequestUserInputParams;
 use codex_app_server_protocol::ToolRequestUserInputQuestion;
 use codex_app_server_protocol::UserInput;
+use codex_messaging::DeliveryWorker;
+use codex_messaging::FileDeliveryStore;
 use codex_messaging::ProviderAdapter;
 use codex_messaging::ProviderCapabilities;
 use codex_messaging::ProviderConversationId;
@@ -51,6 +53,7 @@ async fn audio_attachment_is_rejected_with_session_message() {
     let recorded_turns = Arc::clone(&codex.turns);
     let transport = FakeTransport::default();
     let sent = Arc::clone(&transport.sent);
+    let delivery_transport = transport.clone();
     let (command_catalog, command_catalog_path) =
         CommandCatalog::load_or_create(directory.path()).unwrap();
     let readiness = Arc::new(BridgeReadiness::new(BridgeReadinessSnapshot {
@@ -78,6 +81,19 @@ async fn audio_attachment_is_rejected_with_session_message() {
         true,
         true,
     );
+    let (delivery_events, _delivery_event_rx) = mpsc::channel(16);
+    let delivery_worker = DeliveryWorker::new(
+        delivery_transport,
+        FileDeliveryStore::new(directory.path().join("delivery.json")),
+        delivery_events,
+        std::time::Duration::from_millis(1),
+    )
+    .await
+    .unwrap();
+    let (delivery, delivery_commands) =
+        DeliveryWorker::<FakeTransport, FileDeliveryStore>::channel(8);
+    coordinator.delivery = Some(delivery.clone());
+    let delivery_task = tokio::spawn(delivery_worker.run(delivery_commands));
     let action = coordinator
         .accept_inbound(InboundMessage {
             idempotency_key: "event-audio".to_string(),
@@ -92,6 +108,10 @@ async fn audio_attachment_is_rejected_with_session_message() {
         .unwrap();
 
     coordinator.handle_accepted_action(action).await;
+
+    wait_for_sent(&sent, 1).await;
+    delivery.shutdown().await;
+    delivery_task.await.unwrap();
 
     assert!(recorded_turns.lock().unwrap().is_empty());
     assert_eq!(
@@ -133,7 +153,6 @@ async fn lagged_app_server_events_do_not_emit_recovery_narration() {
         true,
         true,
     );
-
     coordinator
         .handle_event(AppServerEvent::Lagged { skipped: 4 })
         .await;
@@ -149,6 +168,7 @@ async fn user_input_questions_are_collected_in_order() {
     let resolves = Arc::clone(&codex.resolves);
     let transport = FakeTransport::default();
     let sent = Arc::clone(&transport.sent);
+    let delivery_transport = transport.clone();
     let mut state = BridgeState::empty();
     state.binding = Some(crate::state::ThreadBinding {
         self_chat_id: "447700900000@c.us".to_string(),
@@ -188,6 +208,19 @@ async fn user_input_questions_are_collected_in_order() {
         true,
         true,
     );
+    let (delivery_events, _delivery_event_rx) = mpsc::channel(16);
+    let delivery_worker = DeliveryWorker::new(
+        delivery_transport,
+        FileDeliveryStore::new(directory.path().join("delivery.json")),
+        delivery_events,
+        std::time::Duration::from_millis(1),
+    )
+    .await
+    .unwrap();
+    let (delivery, delivery_commands) =
+        DeliveryWorker::<FakeTransport, FileDeliveryStore>::channel(8);
+    coordinator.delivery = Some(delivery.clone());
+    let delivery_task = tokio::spawn(delivery_worker.run(delivery_commands));
     coordinator
         .handle_server_request(ServerRequest::ToolRequestUserInput {
             request_id: RequestId::String("request-1".to_string()),
@@ -217,6 +250,7 @@ async fn user_input_questions_are_collected_in_order() {
             },
         })
         .await;
+    wait_for_sent(&sent, 1).await;
     let first = sent.lock().unwrap()[0].clone();
     let token = first
         .split_once('(')
@@ -225,12 +259,29 @@ async fn user_input_questions_are_collected_in_order() {
         .unwrap()
         .to_string();
     coordinator.answer_request(&token, "one".to_string()).await;
+    wait_for_sent(&sent, 2).await;
     assert!(sent.lock().unwrap()[1].contains("Question 2/2"));
     coordinator.answer_request(&token, "two".to_string()).await;
+    wait_for_sent(&sent, 3).await;
+    delivery.shutdown().await;
+    delivery_task.await.unwrap();
     assert_eq!(resolves.lock().unwrap().len(), 1);
     let resolved = &resolves.lock().unwrap()[0];
     assert_eq!(resolved["answers"]["first"]["answers"][0], "one");
     assert_eq!(resolved["answers"]["second"]["answers"][0], "two");
+}
+
+async fn wait_for_sent(sent: &Arc<Mutex<Vec<String>>>, count: usize) {
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if sent.lock().unwrap().len() >= count {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 #[derive(Clone, Default)]
