@@ -2,6 +2,7 @@ use super::*;
 use codex_app_server_protocol::AgentMessageDeltaNotification;
 use codex_app_server_protocol::ErrorNotification;
 use codex_app_server_protocol::ItemCompletedNotification;
+use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadClosedNotification;
@@ -99,6 +100,35 @@ fn completed_item_replaces_partial_text_and_commits_it() {
             ))
             .is_empty()
     );
+}
+
+#[test]
+fn late_item_start_does_not_erase_streamed_content() {
+    let mut projector = TranscriptProjector::default();
+    projector.apply(ServerNotification::AgentMessageDelta(
+        AgentMessageDeltaNotification {
+            thread_id: "thread-1".to_owned(),
+            turn_id: "turn-1".to_owned(),
+            item_id: "item-1".to_owned(),
+            delta: "already streamed".to_owned(),
+        },
+    ));
+
+    let events = projector.apply(ServerNotification::ItemStarted(ItemStartedNotification {
+        thread_id: "thread-1".to_owned(),
+        turn_id: "turn-1".to_owned(),
+        started_at_ms: 1,
+        item: ThreadItem::AgentMessage {
+            id: "item-1".to_owned(),
+            text: String::new(),
+            phase: Some(MessagePhase::Commentary),
+            memory_citation: None,
+        },
+    }));
+    let [ProjectionEvent::Entry(entry)] = events.as_slice() else {
+        panic!("expected the partial item to be retained");
+    };
+    assert_eq!(entry.plain_text().as_deref(), Some("already streamed"));
 }
 
 #[test]

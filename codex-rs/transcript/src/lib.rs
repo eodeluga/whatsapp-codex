@@ -168,15 +168,18 @@ impl TranscriptProjector {
         &mut self,
         notification: ItemStartedNotification,
     ) -> Option<ProjectionEvent> {
-        self.upsert(
-            TranscriptKey::new(
-                notification.thread_id,
-                notification.turn_id,
-                notification.item.id().to_owned(),
-            ),
-            notification.item,
-            false,
-        )
+        let key = TranscriptKey::new(
+            &notification.thread_id,
+            &notification.turn_id,
+            notification.item.id().to_owned(),
+        );
+        let item = self
+            .entry_indexes
+            .get(&key)
+            .and_then(|index| self.entries.get(*index))
+            .map(|entry| preserve_started_content(&entry.item, notification.item.clone()))
+            .unwrap_or(notification.item);
+        self.upsert(key, item, false)
     }
 
     fn apply_item_completed(
@@ -469,6 +472,61 @@ impl TranscriptProjector {
         self.entry_indexes.insert(key, self.entries.len());
         self.entries.push(entry.clone());
         Some(ProjectionEvent::Entry(Box::new(entry)))
+    }
+}
+
+fn preserve_started_content(existing: &ThreadItem, started: ThreadItem) -> ThreadItem {
+    match (existing, started) {
+        (
+            ThreadItem::AgentMessage {
+                id,
+                text,
+                phase: existing_phase,
+                ..
+            },
+            ThreadItem::AgentMessage {
+                phase,
+                memory_citation,
+                text: started_text,
+                ..
+            },
+        ) if !text.is_empty() && started_text.is_empty() => ThreadItem::AgentMessage {
+            id: id.clone(),
+            text: text.clone(),
+            phase: phase.or_else(|| existing_phase.clone()),
+            memory_citation,
+        },
+        (
+            ThreadItem::Plan { id, text },
+            ThreadItem::Plan {
+                text: started_text, ..
+            },
+        ) if !text.is_empty() && started_text.is_empty() => ThreadItem::Plan {
+            id: id.clone(),
+            text: text.clone(),
+        },
+        (
+            ThreadItem::Reasoning {
+                id,
+                summary,
+                content,
+            },
+            ThreadItem::Reasoning {
+                summary: started_summary,
+                content: started_content,
+                ..
+            },
+        ) if (!summary.is_empty() || !content.is_empty())
+            && started_summary.is_empty()
+            && started_content.is_empty() =>
+        {
+            ThreadItem::Reasoning {
+                id: id.clone(),
+                summary: summary.clone(),
+                content: content.clone(),
+            }
+        }
+        (_, started) => started,
     }
 }
 
