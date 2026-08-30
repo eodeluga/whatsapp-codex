@@ -1,11 +1,11 @@
 [package]
-name = "codex-transcript"
+name = "codex-messaging"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "codex_transcript"
+name = "codex_messaging"
 path = "src/lib.rs"
 doctest = false
 
@@ -13,10 +13,10 @@ doctest = false
 workspace = true
 
 [dependencies]
-codex-app-server-protocol = { workspace = true }
+codex-transcript = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-tracing = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
 
 [dev-dependencies]
-codex-protocol = { workspace = true }
 pretty_assertions = { workspace = true }

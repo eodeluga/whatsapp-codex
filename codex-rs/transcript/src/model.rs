@@ -1,7 +1,10 @@
 use codex_app_server_protocol::ThreadItem;
+use serde::Deserialize;
+use serde::Serialize;
 
 /// Stable identity for one item in one Codex turn.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TranscriptKey {
     pub thread_id: String,
     pub turn_id: String,
@@ -23,7 +26,7 @@ impl TranscriptKey {
 }
 
 /// Origin classification used by downstream delivery policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntryOrigin {
     /// A user-visible item or warning authored by Codex.
     CodexTranscript,
@@ -34,7 +37,8 @@ pub enum EntryOrigin {
 }
 
 /// One ordered semantic transcript entry.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TranscriptEntry {
     pub key: TranscriptKey,
     pub item: ThreadItem,

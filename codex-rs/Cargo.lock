@@ -3587,6 +3587,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-messaging"
+version = "0.0.0"
+dependencies = [
+ "codex-transcript",
+ "pretty_assertions",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "codex-model-provider"
 version = "0.0.0"
 dependencies = [
@@ -4169,6 +4180,7 @@ dependencies = [
  "codex-app-server-protocol",
  "codex-protocol",
  "pretty_assertions",
+ "serde",
  "tracing",
 ]
 

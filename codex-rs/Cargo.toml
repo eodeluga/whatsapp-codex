@@ -118,6 +118,7 @@ members = [
     "utils/template",
     "codex-client",
     "codex-api",
+    "messaging",
     "transcript",
     "state",
     "terminal-detection",
@@ -207,6 +208,7 @@ codex-linux-sandbox = { path = "linux-sandbox" }
 codex-lmstudio = { path = "lmstudio" }
 codex-login = { path = "login" }
 codex-message-history = { path = "message-history" }
+codex-messaging = { path = "messaging" }
 codex-transcript = { path = "transcript" }
 codex-memories-extension = { path = "ext/memories" }
 codex-web-search-extension = { path = "ext/web-search" }
