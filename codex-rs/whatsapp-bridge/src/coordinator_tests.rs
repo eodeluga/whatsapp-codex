@@ -101,6 +101,47 @@ async fn audio_attachment_is_rejected_with_session_message() {
 }
 
 #[tokio::test]
+async fn lagged_app_server_events_do_not_emit_recovery_narration() {
+    let directory = tempdir().unwrap();
+    let state_path = directory.path().join("state.json");
+    let transport = FakeTransport::default();
+    let sent = Arc::clone(&transport.sent);
+    let (command_catalog, command_catalog_path) =
+        CommandCatalog::load_or_create(directory.path()).unwrap();
+    let readiness = Arc::new(BridgeReadiness::new(BridgeReadinessSnapshot {
+        ready: true,
+        state_healthy: true,
+        app_server_connected: true,
+        transport_healthy: true,
+    }));
+    let mut coordinator = Coordinator::new(
+        FakeCodex::default(),
+        transport,
+        BridgeState::empty(),
+        state_path,
+        directory.path().join("attachments"),
+        "447700900000".to_string(),
+        "447700900000@c.us".to_string(),
+        3_500,
+        1_500,
+        20,
+        100,
+        24,
+        command_catalog,
+        command_catalog_path,
+        readiness,
+        true,
+        true,
+    );
+
+    coordinator
+        .handle_event(AppServerEvent::Lagged { skipped: 4 })
+        .await;
+
+    assert!(sent.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn user_input_questions_are_collected_in_order() {
     let directory = tempdir().unwrap();
     let state_path = directory.path().join("state.json");

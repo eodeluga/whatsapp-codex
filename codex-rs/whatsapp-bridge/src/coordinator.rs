@@ -623,9 +623,6 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                         {
                             self.send(&error).await;
                         }
-                    } else {
-                        self.send("[codex] The previous turn is no longer present in Codex.")
-                            .await;
                     }
                 }
                 true
@@ -664,8 +661,6 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                 self.state_healthy = false;
                 self.refresh_readiness();
             }
-            self.send("[codex] Cleared stale active-turn state because no Codex thread was bound.")
-                .await;
             return;
         };
         let response = match self.codex.resume_thread(binding.codex_thread_id).await {
@@ -734,9 +729,6 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             {
                 self.send(&error).await;
             }
-        } else {
-            self.send("[codex] Cleared stale active-turn state; the previous turn was no longer present in Codex.")
-                .await;
         }
         if !self.state.queued_prompts.is_empty() {
             self.advance_queue().await;
@@ -1422,10 +1414,10 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             }
             AppServerEvent::Lagged { skipped } => {
                 self.stream_degraded = true;
-                self.send(&format!(
-                    "[codex] The app-server event stream skipped {skipped} event(s); reconciling the current turn."
-                ))
-                .await;
+                tracing::warn!(
+                    skipped,
+                    "app-server event stream lagged; reconciling the current turn"
+                );
                 if !self.resume_after_reconnect().await {
                     self.app_server_connected = false;
                     self.refresh_readiness();
