@@ -11,7 +11,6 @@ use crate::health::BridgeReadinessSnapshot;
 use crate::notifications::notification_thread_id;
 use crate::notifications::server_request_thread_id;
 use crate::state::BridgeState;
-use crate::state::OutboundMessage;
 use crate::state::PendingSteer;
 use crate::state::PendingUserInput;
 use crate::state::PendingUserInputOption;
@@ -2061,62 +2060,9 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             self.refresh_readiness();
             return None;
         }
-        self.state.outbox.push(OutboundMessage {
-            response_id: response_id.clone(),
-            chat_id: self.self_chat_id.clone(),
-            body: text,
-            attempts: 0,
-        });
-        if self.state.save(&self.state_path).is_err() {
-            self.state.outbox.pop();
-            self.state_healthy = false;
-            self.refresh_readiness();
-            return None;
-        }
-        self.flush_outbox().await.remove(&response_id)
-    }
-
-    async fn flush_outbox(&mut self) -> HashMap<String, String> {
-        let mut delivered = HashMap::new();
-        let mut delivered_any = false;
-        while let Some(message) = self.state.outbox.first().cloned() {
-            match TransportClient::send_text(&self.transport, message.chat_id, message.body).await {
-                Ok(message_id) => {
-                    delivered_any = true;
-                    self.state.outbox.remove(0);
-                    self.state
-                        .mark_outbound(message_id.clone(), unix_timestamp());
-                    delivered.insert(message.response_id, message_id);
-                    self.state.prune(
-                        unix_timestamp(),
-                        self.dedupe_ttl_hours,
-                        self.dedupe_capacity,
-                    );
-                    if self.state.save(&self.state_path).is_err() {
-                        self.state_healthy = false;
-                        self.refresh_readiness();
-                        break;
-                    }
-                }
-                Err(_) => {
-                    self.transport_healthy = false;
-                    self.refresh_readiness();
-                    if let Some(queued) = self.state.outbox.first_mut() {
-                        queued.attempts = queued.attempts.saturating_add(1);
-                    }
-                    if self.state.save(&self.state_path).is_err() {
-                        self.state_healthy = false;
-                        self.refresh_readiness();
-                    }
-                    break;
-                }
-            }
-        }
-        if delivered_any {
-            self.transport_healthy = true;
-            self.refresh_readiness();
-        }
-        delivered
+        TransportClient::send_text(&self.transport, self.self_chat_id.clone(), text)
+            .await
+            .ok()
     }
 
     fn recover_state_storage(&mut self) {
