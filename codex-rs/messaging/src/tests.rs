@@ -336,6 +336,42 @@ fn authoritative_shorter_revision_supersedes_stale_segments() {
 }
 
 #[test]
+fn retry_deadline_hides_pending_record_until_backoff_expires() {
+    let key = TranscriptKey::new("thread", "turn", "item");
+    let mut journal = DeliveryJournal::default();
+    journal.apply(
+        DeliveryIntent {
+            conversation_id: ProviderConversationId::new("chat"),
+            generation: 0,
+            key,
+            origin: EntryOrigin::CodexTranscript,
+            text: "hello".to_string(),
+            revision: 1,
+            committed: true,
+        },
+        100,
+    );
+    journal.records[0].next_attempt_at_ms = Some(10);
+    assert_eq!(journal.next_pending_index(9), None);
+    assert_eq!(journal.next_pending_index(10), Some(0));
+
+    journal.records[0].next_attempt_at_ms = Some(10);
+    journal.apply(
+        DeliveryIntent {
+            conversation_id: ProviderConversationId::new("chat"),
+            generation: 0,
+            key: journal.records[0].key.clone(),
+            origin: EntryOrigin::CodexTranscript,
+            text: "updated".to_string(),
+            revision: 2,
+            committed: true,
+        },
+        100,
+    );
+    assert_eq!(journal.records[0].next_attempt_at_ms, None);
+}
+
+#[test]
 fn legacy_delivery_records_load_with_new_metadata_defaults() {
     let record: DeliveryRecord = serde_json::from_value(serde_json::json!({
         "conversationId": "chat",
@@ -356,4 +392,5 @@ fn legacy_delivery_records_load_with_new_metadata_defaults() {
     .unwrap();
     assert_eq!(record.generation, 0);
     assert_eq!(record.coalesced_revisions, 0);
+    assert_eq!(record.next_attempt_at_ms, None);
 }

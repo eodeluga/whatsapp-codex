@@ -12,6 +12,8 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use tokio::sync::mpsc;
 
 /// Durable state for one provider segment.
@@ -32,6 +34,8 @@ pub struct DeliveryRecord {
     pub attempts: u32,
     #[serde(default)]
     pub coalesced_revisions: u64,
+    #[serde(default)]
+    pub next_attempt_at_ms: Option<u64>,
 }
 
 /// Delivery state persisted for a segment.
@@ -127,6 +131,7 @@ impl DeliveryJournal {
                         record.revision = intent.revision;
                         record.committed = intent.committed;
                         record.generation = intent.generation;
+                        record.next_attempt_at_ms = None;
                         if record.state == DeliveryState::Superseded {
                             record.state = DeliveryState::Pending;
                         }
@@ -152,6 +157,7 @@ impl DeliveryJournal {
                         provider_message_id: None,
                         attempts: 0,
                         coalesced_revisions: 0,
+                        next_attempt_at_ms: None,
                     });
                     changed += 1;
                 }
@@ -171,9 +177,15 @@ impl DeliveryJournal {
         changed
     }
 
-    fn next_pending_index(&self) -> Option<usize> {
+    pub(crate) fn next_pending_index(&self, now_ms: u64) -> Option<usize> {
         for (index, record) in self.records.iter().enumerate() {
             if record.state != DeliveryState::Pending {
+                continue;
+            }
+            if record
+                .next_attempt_at_ms
+                .is_some_and(|next_attempt_at_ms| next_attempt_at_ms > now_ms)
+            {
                 continue;
             }
             return Some(index);
@@ -350,7 +362,7 @@ where
 
     async fn deliver_pending(&mut self) {
         let capabilities = self.adapter.capabilities();
-        while let Some(index) = self.journal.next_pending_index() {
+        while let Some(index) = self.journal.next_pending_index(unix_millis()) {
             let record = self.journal.records[index].clone();
             if capabilities.edit_support
                 && let Some(message_id) = record.provider_message_id.clone()
@@ -379,6 +391,7 @@ where
                             "provider edit finished"
                         );
                         self.journal.records[index].state = DeliveryState::Sent;
+                        self.journal.records[index].next_attempt_at_ms = None;
                         let coalesced_revisions = self.journal.records[index].coalesced_revisions;
                         self.journal.records[index].coalesced_revisions = 0;
                         if self.persist().await.is_err() {
@@ -429,6 +442,7 @@ where
                         };
                         self.journal.records[index].provider_message_id = Some(message_id);
                         self.journal.records[index].state = DeliveryState::Sent;
+                        self.journal.records[index].next_attempt_at_ms = None;
                         if self.persist().await.is_err() {
                             let _ = self.events.try_send(DeliveryWorkerEvent::StoreFailed);
                             break;
@@ -447,6 +461,16 @@ where
     async fn failed(&mut self, index: usize, record: DeliveryRecord, error: ProviderError) {
         self.journal.records[index].attempts =
             self.journal.records[index].attempts.saturating_add(1);
+        let exponent = self.journal.records[index]
+            .attempts
+            .saturating_sub(1)
+            .min(6);
+        let base_delay_ms = self.retry_delay.as_millis().max(1);
+        let delay_ms = base_delay_ms
+            .saturating_mul(1u128 << exponent)
+            .min(u64::MAX as u128) as u64;
+        self.journal.records[index].next_attempt_at_ms =
+            Some(unix_millis().saturating_add(delay_ms));
         let _ = self.persist().await;
         let _ = self.events.try_send(DeliveryWorkerEvent::Failed {
             key: record.key,
@@ -454,4 +478,12 @@ where
             error,
         });
     }
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            duration.as_millis().min(u64::MAX as u128) as u64
+        })
 }
