@@ -1,5 +1,6 @@
 //! Building blocks for the self-hosted WhatsApp-to-Codex bridge.
 
+pub mod attachment;
 pub mod codex;
 pub mod commands;
 pub mod coordinator;

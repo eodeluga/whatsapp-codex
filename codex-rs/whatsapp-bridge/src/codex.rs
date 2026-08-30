@@ -117,7 +117,7 @@ pub trait CodexClient: Send {
         &self,
         thread_id: String,
         message_id: String,
-        prompt: String,
+        input: Vec<UserInput>,
     ) -> impl std::future::Future<Output = Result<String, CodexError>> + Send;
 
     fn steer_turn(
@@ -125,7 +125,7 @@ pub trait CodexClient: Send {
         thread_id: String,
         turn_id: String,
         message_id: String,
-        prompt: String,
+        input: Vec<UserInput>,
     ) -> impl std::future::Future<Output = Result<(), CodexError>> + Send;
 
     fn interrupt_turn(
@@ -300,7 +300,7 @@ impl CodexClient for RemoteCodexClient {
         &self,
         thread_id: String,
         message_id: String,
-        prompt: String,
+        input: Vec<UserInput>,
     ) -> Result<String, CodexError> {
         let response: TurnStartResponse = self
             .client()?
@@ -309,10 +309,7 @@ impl CodexClient for RemoteCodexClient {
                 params: TurnStartParams {
                     thread_id,
                     client_user_message_id: Some(message_id),
-                    input: vec![UserInput::Text {
-                        text: prompt,
-                        text_elements: Vec::new(),
-                    }],
+                    input,
                     ..Default::default()
                 },
             })
@@ -326,7 +323,7 @@ impl CodexClient for RemoteCodexClient {
         thread_id: String,
         turn_id: String,
         message_id: String,
-        prompt: String,
+        input: Vec<UserInput>,
     ) -> Result<(), CodexError> {
         let _: TurnSteerResponse = self
             .client()?
@@ -335,10 +332,7 @@ impl CodexClient for RemoteCodexClient {
                 params: TurnSteerParams {
                     thread_id,
                     client_user_message_id: Some(message_id),
-                    input: vec![UserInput::Text {
-                        text: prompt,
-                        text_elements: Vec::new(),
-                    }],
+                    input,
                     expected_turn_id: turn_id,
                     ..Default::default()
                 },

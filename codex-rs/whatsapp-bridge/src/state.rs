@@ -1,5 +1,6 @@
 //! Durable, bounded bridge state.
 
+use crate::attachment::InboundAttachment;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -9,7 +10,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use thiserror::Error;
 
-pub const STATE_SCHEMA_VERSION: u32 = 3;
+pub const STATE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -46,6 +47,8 @@ pub struct ActiveTurn {
     pub thread_id: String,
     pub codex_turn_id: String,
     pub working_output_message_id: Option<String>,
+    #[serde(default)]
+    pub attachment_paths: Vec<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +57,8 @@ pub struct QueuedPrompt {
     pub idempotency_key: String,
     pub message_id: String,
     pub body: String,
+    #[serde(default)]
+    pub attachment: Option<InboundAttachment>,
     pub accepted_at: u64,
     #[serde(default)]
     pub submission_uncertain: bool,
@@ -67,6 +72,8 @@ pub struct PendingSteer {
     pub idempotency_key: String,
     pub message_id: String,
     pub body: String,
+    #[serde(default)]
+    pub attachment: Option<InboundAttachment>,
     pub thread_id: String,
     pub expected_turn_id: String,
     pub accepted_at: u64,
@@ -111,6 +118,10 @@ impl BridgeState {
                     serde_json::from_slice(&bytes).map_err(|_| StateError::Parse)?;
                 match state.schema_version {
                     STATE_SCHEMA_VERSION => Ok(state),
+                    3 => {
+                        state.schema_version = STATE_SCHEMA_VERSION;
+                        Ok(state)
+                    }
                     2 => {
                         state.schema_version = STATE_SCHEMA_VERSION;
                         Ok(state)

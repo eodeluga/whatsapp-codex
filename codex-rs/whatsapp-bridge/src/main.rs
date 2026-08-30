@@ -39,6 +39,8 @@ struct TransportState {
     bridge_name: String,
 }
 
+const MAX_WEBHOOK_BODY_BYTES: usize = 72 * 1024 * 1024;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt().with_target(false).try_init();
@@ -80,6 +82,9 @@ async fn main() -> anyhow::Result<()> {
     };
     let mut app_server_connected = codex.is_connected();
     let state_path = runtime.state_path.clone();
+    let attachment_dir = env::var_os("CODEX_WHATSAPP_ATTACHMENT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| codex_home.join("whatsapp").join("attachments"));
     let mut state = BridgeState::load(&state_path)?;
     if let Some(binding) = state.binding.clone() {
         if binding.self_chat_id != self_chat_id {
@@ -135,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
             transport.clone(),
             state,
             state_path,
+            attachment_dir,
             configured_phone,
             self_chat_id.clone(),
             runtime.output_chunk_chars,
@@ -155,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/health/ready", get(health_ready))
         .route("/pairing", get(pairing_qr))
         .route("/webhooks/transport", post(transport_webhook))
-        .layer(DefaultBodyLimit::max(64 * 1024))
+        .layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES))
         .with_state(TransportState {
             secret: Arc::new(runtime.webhook_signing_secret.into_bytes()),
             self_chat_id,

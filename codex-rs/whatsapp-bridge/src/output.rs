@@ -1,5 +1,7 @@
 //! WhatsApp-safe assistant-output aggregation and chunking.
 
+use codex_protocol::models::MessagePhase;
+
 const MAX_ASSISTANT_OUTPUT_CHARS: usize = 100_000;
 const MAX_ASSISTANT_ITEMS_PER_TURN: usize = 64;
 const TRUNCATION_NOTICE: &str = "\n\n[codex] Output truncated at 100,000 characters.";
@@ -53,8 +55,15 @@ impl OutputAggregator {
         thread_id: String,
         turn_id: String,
         item_id: String,
+        phase: Option<MessagePhase>,
         text: String,
     ) {
+        if matches!(phase, Some(MessagePhase::Commentary)) {
+            self.items.retain(|item| {
+                !(item.thread_id == thread_id && item.turn_id == turn_id && item.item_id == item_id)
+            });
+            return;
+        }
         if let Some(item) = self.item_mut(&thread_id, &turn_id, &item_id) {
             item.text = truncate_output(text);
         } else if self
