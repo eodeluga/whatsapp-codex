@@ -1,0 +1,21 @@
+[package]
+name = "codex-transcript"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "codex_transcript"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+codex-app-server-protocol = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+codex-protocol = { workspace = true }
+pretty_assertions = { workspace = true }

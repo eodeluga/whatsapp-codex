@@ -225,6 +225,7 @@ Run targeted repository workflows from `codex-rs`:
 ```shell
 just fmt
 just test -p codex-config
+just test -p codex-transcript
 just test -p codex-tui
 just test -p codex-whatsapp-bridge
 ```

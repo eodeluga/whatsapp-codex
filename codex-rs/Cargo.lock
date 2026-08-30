@@ -4163,6 +4163,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-transcript"
+version = "0.0.0"
+dependencies = [
+ "codex-app-server-protocol",
+ "codex-protocol",
+ "pretty_assertions",
+ "tracing",
+]
+
+[[package]]
 name = "codex-tui"
 version = "0.0.0"
 dependencies = [

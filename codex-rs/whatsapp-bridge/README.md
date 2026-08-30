@@ -138,6 +138,7 @@ Run from `codex-rs`:
 
 ```shell
 just fmt
+just test -p codex-transcript
 just test -p codex-whatsapp-bridge
 ```
 
