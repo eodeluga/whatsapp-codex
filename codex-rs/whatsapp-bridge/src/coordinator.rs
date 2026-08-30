@@ -38,6 +38,8 @@ use codex_app_server_protocol::ToolRequestUserInputResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_protocol::models::MessagePhase;
+use codex_transcript::ProjectionEvent;
+use codex_transcript::TranscriptProjector;
 use codex_utils_approval_presentation::ApprovalDecision;
 use codex_utils_approval_presentation::ApprovalPresentation;
 use codex_utils_approval_presentation::command_execution_presentation;
@@ -150,6 +152,7 @@ pub struct Coordinator<C, O> {
     dedupe_ttl_hours: u64,
     command_catalog: CommandCatalog,
     command_catalog_path: PathBuf,
+    projector: TranscriptProjector,
     output: OutputAggregator,
     file_change_paths: HashMap<(String, String, String), Vec<String>>,
     pending_requests: HashMap<String, PendingRequest>,
@@ -200,6 +203,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             dedupe_ttl_hours,
             command_catalog,
             command_catalog_path,
+            projector: TranscriptProjector::default(),
             output: OutputAggregator::default(),
             file_change_paths: HashMap::new(),
             pending_requests: HashMap::new(),
@@ -1387,6 +1391,13 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                 .is_some_and(|binding| binding.codex_thread_id != thread_id)
         {
             return;
+        }
+        let projection = self.projector.apply(notification.clone());
+        if projection
+            .iter()
+            .any(|event| matches!(event, ProjectionEvent::Suppressed))
+        {
+            tracing::trace!("suppressed app-server notification from provider output");
         }
         match notification {
             ServerNotification::AgentMessageDelta(delta) => {

@@ -4601,6 +4601,7 @@ dependencies = [
  "codex-config",
  "codex-messaging",
  "codex-protocol",
+ "codex-transcript",
  "codex-utils-absolute-path",
  "codex-utils-approval-presentation",
  "hmac 0.12.1",
