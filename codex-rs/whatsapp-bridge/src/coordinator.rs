@@ -37,6 +37,12 @@ use codex_app_server_protocol::ToolRequestUserInputAnswer;
 use codex_app_server_protocol::ToolRequestUserInputResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
+use codex_messaging::DeliveryIntent;
+use codex_messaging::DeliveryWorker;
+use codex_messaging::DeliveryWorkerHandle;
+use codex_messaging::FileDeliveryStore;
+use codex_messaging::ProviderAdapter;
+use codex_messaging::ProviderConversationId;
 use codex_protocol::models::MessagePhase;
 use codex_transcript::ProjectionEvent;
 use codex_transcript::TranscriptProjector;
@@ -154,6 +160,7 @@ pub struct Coordinator<C, O> {
     command_catalog_path: PathBuf,
     projector: TranscriptProjector,
     output: OutputAggregator,
+    delivery: Option<DeliveryWorkerHandle>,
     file_change_paths: HashMap<(String, String, String), Vec<String>>,
     pending_requests: HashMap<String, PendingRequest>,
     pending_approvals: VecDeque<PendingApproval>,
@@ -167,7 +174,7 @@ pub struct Coordinator<C, O> {
     resume_failures: u8,
 }
 
-impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
+impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coordinator<C, O> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         codex: C,
@@ -205,6 +212,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             command_catalog_path,
             projector: TranscriptProjector::default(),
             output: OutputAggregator::default(),
+            delivery: None,
             file_change_paths: HashMap::new(),
             pending_requests: HashMap::new(),
             pending_approvals: VecDeque::new(),
@@ -221,6 +229,27 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
 
     pub async fn run(mut self, mut commands: mpsc::Receiver<CoordinatorCommand>) {
         self.cleanup_stale_attachments();
+        let (delivery, delivery_commands) =
+            DeliveryWorker::<O, FileDeliveryStore>::channel(MAX_OUTBOX_MESSAGES);
+        let (delivery_events, _delivery_event_rx) = mpsc::channel(128);
+        let delivery_path = self.state_path.with_extension("delivery.json");
+        let delivery_task = match DeliveryWorker::new(
+            self.transport.clone(),
+            FileDeliveryStore::new(delivery_path),
+            delivery_events,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        {
+            Ok(worker) => {
+                self.delivery = Some(delivery.clone());
+                Some(tokio::spawn(worker.run(delivery_commands)))
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to load the durable delivery journal");
+                None
+            }
+        };
         let legacy_failure = "[codex] Codex app-server is unavailable.";
         if self
             .state
@@ -363,11 +392,17 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
                 }
             }
         }
+        if let Some(delivery) = self.delivery.take() {
+            delivery.shutdown().await;
+        }
+        if let Some(task) = delivery_task {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(15), task).await;
+        }
         self.readiness.mark_stopped();
     }
 
     async fn check_transport(&mut self) {
-        let healthy = match self.transport.status().await {
+        let healthy = match TransportClient::status(&self.transport).await {
             Ok(session) => {
                 session.status.eq_ignore_ascii_case("ready")
                     && session
@@ -1577,11 +1612,14 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             return;
         };
         self.last_edit_at = Some(tokio::time::Instant::now());
-        if self
-            .transport
-            .edit_text(self.self_chat_id.clone(), message_id, chunk)
-            .await
-            .is_err()
+        if TransportClient::edit_text(
+            &self.transport,
+            self.self_chat_id.clone(),
+            message_id,
+            chunk,
+        )
+        .await
+        .is_err()
         {
             self.live_edit_disabled = true;
         }
@@ -1620,10 +1658,14 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
             return;
         };
         let edited = if let Some(message_id) = working_message_id {
-            self.transport
-                .edit_text(self.self_chat_id.clone(), message_id, first.clone())
-                .await
-                .is_ok()
+            TransportClient::edit_text(
+                &self.transport,
+                self.self_chat_id.clone(),
+                message_id,
+                first.clone(),
+            )
+            .await
+            .is_ok()
         } else {
             false
         };
@@ -1979,15 +2021,31 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
     }
 
     async fn send_tracked(&mut self, text: &str) -> Option<String> {
-        if !self.state_healthy || self.state.outbox.len() >= MAX_OUTBOX_MESSAGES {
-            if self.state.outbox.len() >= MAX_OUTBOX_MESSAGES {
+        if !self.state_healthy {
+            return None;
+        }
+        let text = self.command_catalog.rewrite_legacy_prefix(text);
+        let response_id = Uuid::new_v4().simple().to_string();
+        if let Some(delivery) = &self.delivery {
+            let intent = DeliveryIntent {
+                conversation_id: ProviderConversationId::new(self.self_chat_id.clone()),
+                key: codex_transcript::TranscriptKey::new("bridge", "notice", response_id),
+                origin: codex_transcript::EntryOrigin::BridgeNotice,
+                text,
+                revision: 1,
+                committed: true,
+            };
+            if delivery.try_apply(intent).is_err() {
                 self.transport_healthy = false;
                 self.refresh_readiness();
             }
             return None;
         }
-        let text = self.command_catalog.rewrite_legacy_prefix(text);
-        let response_id = Uuid::new_v4().simple().to_string();
+        if self.state.outbox.len() >= MAX_OUTBOX_MESSAGES {
+            self.transport_healthy = false;
+            self.refresh_readiness();
+            return None;
+        }
         self.state.outbox.push(OutboundMessage {
             response_id: response_id.clone(),
             chat_id: self.self_chat_id.clone(),
@@ -2007,11 +2065,7 @@ impl<C: CodexClient, O: TransportClient> Coordinator<C, O> {
         let mut delivered = HashMap::new();
         let mut delivered_any = false;
         while let Some(message) = self.state.outbox.first().cloned() {
-            match self
-                .transport
-                .send_text(message.chat_id, message.body)
-                .await
-            {
+            match TransportClient::send_text(&self.transport, message.chat_id, message.body).await {
                 Ok(message_id) => {
                     delivered_any = true;
                     self.state.outbox.remove(0);

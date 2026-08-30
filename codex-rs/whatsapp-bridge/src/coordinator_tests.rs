@@ -7,6 +7,12 @@ use crate::transport::TransportError;
 use crate::transport::TransportStatus;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::UserInput;
+use codex_messaging::ProviderAdapter;
+use codex_messaging::ProviderCapabilities;
+use codex_messaging::ProviderConversationId;
+use codex_messaging::ProviderError;
+use codex_messaging::ProviderMessageId;
+use codex_messaging::ProviderStatus;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -216,6 +222,54 @@ impl TransportClient for FakeTransport {
 
     async fn pairing_qr(&self) -> Result<Option<String>, TransportError> {
         Ok(None)
+    }
+}
+
+impl ProviderAdapter for FakeTransport {
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            message_limit: 4_096,
+            edit_support: true,
+            attachment_support: true,
+            rich_interaction_support: false,
+        }
+    }
+
+    async fn status(&self) -> Result<ProviderStatus, ProviderError> {
+        TransportClient::status(self)
+            .await
+            .map(|status| ProviderStatus {
+                ready: status.status == "ready",
+                account: status.account,
+            })
+            .map_err(|_| ProviderError::Transport)
+    }
+
+    async fn send_text(
+        &self,
+        conversation_id: ProviderConversationId,
+        text: String,
+    ) -> Result<ProviderMessageId, ProviderError> {
+        TransportClient::send_text(self, conversation_id.as_str().to_string(), text)
+            .await
+            .map(ProviderMessageId::new)
+            .map_err(|_| ProviderError::Transport)
+    }
+
+    async fn edit_text(
+        &self,
+        conversation_id: ProviderConversationId,
+        message_id: ProviderMessageId,
+        text: String,
+    ) -> Result<(), ProviderError> {
+        TransportClient::edit_text(
+            self,
+            conversation_id.as_str().to_string(),
+            message_id.as_str().to_string(),
+            text,
+        )
+        .await
+        .map_err(|_| ProviderError::Transport)
     }
 }
 

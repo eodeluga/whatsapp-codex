@@ -19,6 +19,7 @@ pub use delivery::DeliveryWorker;
 pub use delivery::DeliveryWorkerCommand;
 pub use delivery::DeliveryWorkerEvent;
 pub use delivery::DeliveryWorkerHandle;
+pub use delivery::FileDeliveryStore;
 pub use model::DeliveryIntent;
 pub use model::InboundEnvelope;
 pub use model::ProviderAdapter;

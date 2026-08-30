@@ -8,6 +8,7 @@ use codex_transcript::TranscriptKey;
 use serde::Deserialize;
 use serde::Serialize;
 use std::future::Future;
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -38,6 +39,48 @@ pub enum DeliveryState {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryJournal {
     pub records: Vec<DeliveryRecord>,
+}
+
+/// JSON-backed journal storage for a provider-independent delivery queue.
+#[derive(Clone, Debug)]
+pub struct FileDeliveryStore {
+    path: PathBuf,
+}
+
+impl FileDeliveryStore {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl DeliveryStore for FileDeliveryStore {
+    async fn load(&mut self) -> Result<DeliveryJournal, String> {
+        match tokio::fs::read(&self.path).await {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(DeliveryJournal::default())
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    async fn save(&mut self, journal: &DeliveryJournal) -> Result<(), String> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| "delivery journal path has no parent".to_string())?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| error.to_string())?;
+        let bytes = serde_json::to_vec_pretty(journal).map_err(|error| error.to_string())?;
+        let temporary = self.path.with_extension("json.tmp");
+        tokio::fs::write(&temporary, bytes)
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::fs::rename(&temporary, &self.path)
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 impl DeliveryJournal {
@@ -144,6 +187,15 @@ pub struct DeliveryWorkerHandle {
 }
 
 impl DeliveryWorkerHandle {
+    pub fn try_apply(&self, intent: DeliveryIntent) -> Result<(), DeliveryIntent> {
+        self.sender
+            .try_send(DeliveryWorkerCommand::Apply(intent))
+            .map_err(|error| match error.into_inner() {
+                DeliveryWorkerCommand::Apply(intent) => intent,
+                DeliveryWorkerCommand::Shutdown => unreachable!("shutdown is never returned"),
+            })
+    }
+
     pub async fn apply(&self, intent: DeliveryIntent) -> Result<(), DeliveryIntent> {
         self.sender
             .send(DeliveryWorkerCommand::Apply(intent))
@@ -204,14 +256,13 @@ where
                     self.journal
                         .apply(intent, self.adapter.capabilities().message_limit);
                     if self.persist().await.is_err() {
-                        let _ = self.events.send(DeliveryWorkerEvent::StoreFailed).await;
+                        let _ = self.events.try_send(DeliveryWorkerEvent::StoreFailed);
                         continue;
                     }
                     let queue_depth = self.journal.records.len();
                     let _ = self
                         .events
-                        .send(DeliveryWorkerEvent::Enqueued { key, queue_depth })
-                        .await;
+                        .try_send(DeliveryWorkerEvent::Enqueued { key, queue_depth });
                     self.deliver_pending().await;
                 }
                 DeliveryWorkerCommand::Shutdown => break,
@@ -242,17 +293,14 @@ where
                     Ok(()) => {
                         self.journal.records[index].state = DeliveryState::Sent;
                         if self.persist().await.is_err() {
-                            let _ = self.events.send(DeliveryWorkerEvent::StoreFailed).await;
+                            let _ = self.events.try_send(DeliveryWorkerEvent::StoreFailed);
                             break;
                         }
-                        let _ = self
-                            .events
-                            .send(DeliveryWorkerEvent::Edited {
-                                key: record.key,
-                                segment: record.segment,
-                                revisions: record.revision,
-                            })
-                            .await;
+                        let _ = self.events.try_send(DeliveryWorkerEvent::Edited {
+                            key: record.key,
+                            segment: record.segment,
+                            revisions: record.revision,
+                        });
                     }
                     Err(error) => {
                         self.failed(index, record, error).await;
@@ -273,10 +321,10 @@ where
                         self.journal.records[index].provider_message_id = Some(message_id);
                         self.journal.records[index].state = DeliveryState::Sent;
                         if self.persist().await.is_err() {
-                            let _ = self.events.send(DeliveryWorkerEvent::StoreFailed).await;
+                            let _ = self.events.try_send(DeliveryWorkerEvent::StoreFailed);
                             break;
                         }
-                        let _ = self.events.send(event).await;
+                        let _ = self.events.try_send(event);
                     }
                     Err(error) => {
                         self.failed(index, record, error).await;
@@ -291,14 +339,11 @@ where
         self.journal.records[index].attempts =
             self.journal.records[index].attempts.saturating_add(1);
         let _ = self.persist().await;
-        let _ = self
-            .events
-            .send(DeliveryWorkerEvent::Failed {
-                key: record.key,
-                segment: record.segment,
-                error,
-            })
-            .await;
+        let _ = self.events.try_send(DeliveryWorkerEvent::Failed {
+            key: record.key,
+            segment: record.segment,
+            error,
+        });
         tokio::time::sleep(self.retry_delay).await;
     }
 }
