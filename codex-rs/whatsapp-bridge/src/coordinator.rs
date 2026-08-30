@@ -13,6 +13,9 @@ use crate::notifications::server_request_thread_id;
 use crate::state::BridgeState;
 use crate::state::OutboundMessage;
 use crate::state::PendingSteer;
+use crate::state::PendingUserInput;
+use crate::state::PendingUserInputOption;
+use crate::state::PendingUserInputQuestion;
 use crate::state::QueuedPrompt;
 use crate::state::unix_timestamp;
 use crate::transport::TransportClient;
@@ -48,6 +51,7 @@ use codex_utils_approval_presentation::ApprovalPresentation;
 use codex_utils_approval_presentation::command_execution_presentation;
 use codex_utils_approval_presentation::file_change_presentation;
 use codex_utils_approval_presentation::permissions_presentation;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -245,6 +249,35 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                 None
             }
         };
+        for pending in self.state.pending_user_inputs.clone() {
+            self.pending_requests.insert(
+                pending.token,
+                PendingRequest::UserInput {
+                    request_id: pending.request_id,
+                    questions: pending
+                        .questions
+                        .into_iter()
+                        .map(|question| PendingQuestion {
+                            id: question.id,
+                            question: question.question,
+                            options: question.options.map(|options| {
+                                options
+                                    .into_iter()
+                                    .map(|option| {
+                                        codex_app_server_protocol::ToolRequestUserInputOption {
+                                            label: option.label,
+                                            description: option.description,
+                                        }
+                                    })
+                                    .collect()
+                            }),
+                        })
+                        .collect(),
+                    answers: pending.answers.into_iter().collect(),
+                    expires_at: pending.expires_at,
+                },
+            );
+        }
         let discarded_legacy_messages = self.state.outbox.len();
         if discarded_legacy_messages > 0 {
             self.state.outbox.clear();
@@ -679,6 +712,7 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                         .reject_server_request(approval.request_id().clone())
                         .await;
                 }
+                self.state.pending_user_inputs.clear();
                 let _ = self.state.save(&self.state_path);
                 let _ =
                     tokio::time::timeout(std::time::Duration::from_secs(5), self.codex.shutdown())
@@ -1451,6 +1485,9 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     .await;
                 self.state.active_turn = None;
                 self.pending_requests.clear();
+                self.state.pending_user_inputs.retain(|pending| {
+                    pending.thread_id != completed.thread_id || pending.turn_id != completed.turn.id
+                });
                 self.pending_approvals.clear();
                 self.file_change_paths.retain(|(thread_id, turn_id, _), _| {
                     thread_id != &completed.thread_id || turn_id != &completed.turn.id
@@ -1481,6 +1518,13 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                 }
                 self.pending_requests
                     .retain(|_, request| request.request_id() != &resolved.request_id);
+                self.state
+                    .pending_user_inputs
+                    .retain(|pending| pending.request_id != resolved.request_id);
+                if self.state.save(&self.state_path).is_err() {
+                    self.state_healthy = false;
+                    self.refresh_readiness();
+                }
             }
             _ => {}
         }
@@ -1570,7 +1614,7 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                 }
                 let presentation = command_execution_presentation(&params);
                 self.enqueue_approval(PendingApproval::Command {
-                    request_id,
+                    request_id: request_id.clone(),
                     presentation,
                 })
                 .await;
@@ -1600,7 +1644,9 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             ServerRequest::ToolRequestUserInput { request_id, params } => {
                 let token = Uuid::new_v4().simple().to_string()[..8].to_string();
                 let expires_at = unix_timestamp().saturating_add(USER_INPUT_TIMEOUT_SECONDS);
-                if !self.is_active_request(&params.thread_id, &params.turn_id) {
+                let thread_id = params.thread_id.clone();
+                let turn_id = params.turn_id.clone();
+                if !self.is_active_request(&thread_id, &turn_id) {
                     let _ = self.codex.reject_server_request(request_id).await;
                     return;
                 }
@@ -1627,15 +1673,48 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                         options: question.options,
                     })
                     .collect::<Vec<_>>();
+                let persisted = PendingUserInput {
+                    token: token.clone(),
+                    request_id: request_id.clone(),
+                    thread_id: thread_id.clone(),
+                    turn_id: turn_id.clone(),
+                    questions: questions
+                        .iter()
+                        .map(|question| PendingUserInputQuestion {
+                            id: question.id.clone(),
+                            question: question.question.clone(),
+                            options: question.options.clone().map(|options| {
+                                options
+                                    .into_iter()
+                                    .map(|option| PendingUserInputOption {
+                                        label: option.label,
+                                        description: option.description,
+                                    })
+                                    .collect()
+                            }),
+                        })
+                        .collect(),
+                    answers: BTreeMap::new(),
+                    expires_at,
+                };
                 self.pending_requests.insert(
                     token.clone(),
                     PendingRequest::UserInput {
-                        request_id,
+                        request_id: request_id.clone(),
                         questions,
                         answers: HashMap::new(),
                         expires_at,
                     },
                 );
+                self.state.pending_user_inputs.push(persisted);
+                if self.state.save(&self.state_path).is_err() {
+                    self.pending_requests.remove(&token);
+                    self.state.pending_user_inputs.pop();
+                    self.state_healthy = false;
+                    self.refresh_readiness();
+                    let _ = self.codex.reject_server_request(request_id).await;
+                    return;
+                }
                 self.send_user_question(&token, 0).await;
             }
             ServerRequest::PermissionsRequestApproval { request_id, params } => {
@@ -1823,7 +1902,19 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                 ..
             }) = self.pending_requests.get_mut(token)
             {
-                *pending_answers = answers;
+                *pending_answers = answers.clone();
+            }
+            if let Some(pending) = self
+                .state
+                .pending_user_inputs
+                .iter_mut()
+                .find(|pending| pending.token == token)
+            {
+                pending.answers = answers.clone().into_iter().collect();
+            }
+            if self.state.save(&self.state_path).is_err() {
+                self.state_healthy = false;
+                self.refresh_readiness();
             }
             self.send_user_question(token, question_index + 1).await;
             return;
@@ -1842,6 +1933,13 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                 .is_ok()
             {
                 self.pending_requests.remove(token);
+                self.state
+                    .pending_user_inputs
+                    .retain(|pending| pending.token != token);
+                if self.state.save(&self.state_path).is_err() {
+                    self.state_healthy = false;
+                    self.refresh_readiness();
+                }
                 self.send("[codex] Answer sent.").await;
             } else {
                 self.send("[codex] Could not deliver that answer.").await;
@@ -1892,8 +1990,15 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             };
             let PendingRequest::UserInput { request_id, .. } = request;
             let _ = self.codex.reject_server_request(request_id).await;
+            self.state
+                .pending_user_inputs
+                .retain(|pending| pending.token != token);
             self.send(&format!("[codex] Question token {token} expired."))
                 .await;
+        }
+        if self.state.save(&self.state_path).is_err() {
+            self.state_healthy = false;
+            self.refresh_readiness();
         }
     }
 

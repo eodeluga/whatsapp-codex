@@ -77,9 +77,24 @@ impl DeliveryStore for FileDeliveryStore {
         tokio::fs::write(&temporary, bytes)
             .await
             .map_err(|error| error.to_string())?;
+        set_private_permissions(&temporary)
+            .await
+            .map_err(|error| error.to_string())?;
         tokio::fs::rename(&temporary, &self.path)
             .await
             .map_err(|error| error.to_string())
+    }
+}
+
+async fn set_private_permissions(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        tokio::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
     }
 }
 
@@ -249,23 +264,33 @@ where
     }
 
     pub async fn run(mut self, mut commands: mpsc::Receiver<DeliveryWorkerCommand>) {
-        while let Some(command) = commands.recv().await {
-            match command {
-                DeliveryWorkerCommand::Apply(intent) => {
-                    let key = intent.key.clone();
-                    self.journal
-                        .apply(intent, self.adapter.capabilities().message_limit);
-                    if self.persist().await.is_err() {
-                        let _ = self.events.try_send(DeliveryWorkerEvent::StoreFailed);
-                        continue;
+        let retry_delay = self.retry_delay.max(Duration::from_millis(1));
+        let mut retry = tokio::time::interval(retry_delay);
+        loop {
+            tokio::select! {
+                command = commands.recv() => {
+                    let Some(command) = command else {
+                        break;
+                    };
+                    match command {
+                        DeliveryWorkerCommand::Apply(intent) => {
+                            let key = intent.key.clone();
+                            self.journal
+                                .apply(intent, self.adapter.capabilities().message_limit);
+                            if self.persist().await.is_err() {
+                                let _ = self.events.try_send(DeliveryWorkerEvent::StoreFailed);
+                                continue;
+                            }
+                            let queue_depth = self.journal.records.len();
+                            let _ = self
+                                .events
+                                .try_send(DeliveryWorkerEvent::Enqueued { key, queue_depth });
+                            self.deliver_pending().await;
+                        }
+                        DeliveryWorkerCommand::Shutdown => break,
                     }
-                    let queue_depth = self.journal.records.len();
-                    let _ = self
-                        .events
-                        .try_send(DeliveryWorkerEvent::Enqueued { key, queue_depth });
-                    self.deliver_pending().await;
                 }
-                DeliveryWorkerCommand::Shutdown => break,
+                _ = retry.tick() => self.deliver_pending().await,
             }
         }
     }
@@ -344,6 +369,5 @@ where
             segment: record.segment,
             error,
         });
-        tokio::time::sleep(self.retry_delay).await;
     }
 }
