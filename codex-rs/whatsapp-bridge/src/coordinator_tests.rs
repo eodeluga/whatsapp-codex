@@ -6,6 +6,8 @@ use crate::codex::ThreadSummary;
 use crate::transport::TransportError;
 use crate::transport::TransportStatus;
 use codex_app_server_protocol::ThreadResumeResponse;
+use codex_app_server_protocol::ToolRequestUserInputParams;
+use codex_app_server_protocol::ToolRequestUserInputQuestion;
 use codex_app_server_protocol::UserInput;
 use codex_messaging::ProviderAdapter;
 use codex_messaging::ProviderCapabilities;
@@ -98,10 +100,103 @@ async fn audio_attachment_is_rejected_with_session_message() {
     );
 }
 
+#[tokio::test]
+async fn user_input_questions_are_collected_in_order() {
+    let directory = tempdir().unwrap();
+    let state_path = directory.path().join("state.json");
+    let codex = FakeCodex::default();
+    let resolves = Arc::clone(&codex.resolves);
+    let transport = FakeTransport::default();
+    let sent = Arc::clone(&transport.sent);
+    let mut state = BridgeState::empty();
+    state.binding = Some(crate::state::ThreadBinding {
+        self_chat_id: "447700900000@c.us".to_string(),
+        codex_thread_id: "thread-1".to_string(),
+    });
+    state.active_turn = Some(crate::state::ActiveTurn {
+        inbound_message_id: "message-1".to_string(),
+        thread_id: "thread-1".to_string(),
+        codex_turn_id: "turn-1".to_string(),
+        working_output_message_id: None,
+        attachment_paths: Vec::new(),
+    });
+    let (command_catalog, command_catalog_path) =
+        CommandCatalog::load_or_create(directory.path()).unwrap();
+    let readiness = Arc::new(BridgeReadiness::new(BridgeReadinessSnapshot {
+        ready: true,
+        state_healthy: true,
+        app_server_connected: true,
+        transport_healthy: true,
+    }));
+    let mut coordinator = Coordinator::new(
+        codex,
+        transport,
+        state,
+        state_path,
+        directory.path().join("attachments"),
+        "447700900000".to_string(),
+        "447700900000@c.us".to_string(),
+        3_500,
+        1_500,
+        20,
+        100,
+        24,
+        command_catalog,
+        command_catalog_path,
+        readiness,
+        true,
+        true,
+    );
+    coordinator
+        .handle_server_request(ServerRequest::ToolRequestUserInput {
+            request_id: RequestId::String("request-1".to_string()),
+            params: ToolRequestUserInputParams {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                item_id: "item-1".to_string(),
+                questions: vec![
+                    ToolRequestUserInputQuestion {
+                        id: "first".to_string(),
+                        header: "First".to_string(),
+                        question: "First answer?".to_string(),
+                        is_other: false,
+                        is_secret: false,
+                        options: None,
+                    },
+                    ToolRequestUserInputQuestion {
+                        id: "second".to_string(),
+                        header: "Second".to_string(),
+                        question: "Second answer?".to_string(),
+                        is_other: false,
+                        is_secret: false,
+                        options: None,
+                    },
+                ],
+                auto_resolution_ms: None,
+            },
+        })
+        .await;
+    let first = sent.lock().unwrap()[0].clone();
+    let token = first
+        .split_once('(')
+        .and_then(|(_, value)| value.split_once(')'))
+        .map(|(token, _)| token)
+        .unwrap()
+        .to_string();
+    coordinator.answer_request(&token, "one".to_string()).await;
+    assert!(sent.lock().unwrap()[1].contains("Question 2/2"));
+    coordinator.answer_request(&token, "two".to_string()).await;
+    assert_eq!(resolves.lock().unwrap().len(), 1);
+    let resolved = &resolves.lock().unwrap()[0];
+    assert_eq!(resolved["answers"]["first"]["answers"][0], "one");
+    assert_eq!(resolved["answers"]["second"]["answers"][0], "two");
+}
+
 #[derive(Clone, Default)]
 struct FakeCodex {
     turns: Arc<Mutex<Vec<(String, String, String)>>>,
     steers: Arc<Mutex<Vec<(String, String, String, String)>>>,
+    resolves: Arc<Mutex<Vec<serde_json::Value>>>,
     start_thread_fails: Arc<AtomicBool>,
 }
 
@@ -178,8 +273,9 @@ impl CodexClient for FakeCodex {
     async fn resolve_server_request(
         &self,
         _request_id: RequestId,
-        _result: serde_json::Value,
+        result: serde_json::Value,
     ) -> Result<(), CodexError> {
+        self.resolves.lock().unwrap().push(result);
         Ok(())
     }
 

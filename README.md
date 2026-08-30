@@ -95,9 +95,12 @@ behavior is limited to the transport and these bridge operations:
 - `/stop` as the WhatsApp text mapping for interrupt;
 - `/whatsapp list-threads` and `/whatsapp attach <thread-id>` for thread selection;
 - numbered plain-text selection for an active approval overlay; and
-- `/answer <token> <answer>` for the existing requested-user-input limitation.
+- `/answer <token> <answer>` for sequential `request_user_input` questions.
 
-Plain text during an active steerable turn uses `turn/steer`. Approval choices
+Plain text during an active steerable turn uses `turn/steer`. Transcript items
+are mirrored through the shared semantic projector as they stream; WhatsApp
+only segments content at its provider limit and does not add normal-output
+prefixes or chunk labels. Approval choices
 have no user-visible IDs and are exactly the choices supplied by Codex. An
 automatic review may accept an action without showing a WhatsApp prompt;
 `Decline` lets the turn continue, while `Cancel` interrupts it. Reply with the

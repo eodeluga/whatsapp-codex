@@ -89,9 +89,17 @@ enum AcceptedAction {
 enum PendingRequest {
     UserInput {
         request_id: RequestId,
-        question_id: String,
+        questions: Vec<PendingQuestion>,
+        answers: HashMap<String, Vec<String>>,
         expires_at: u64,
     },
+}
+
+#[derive(Clone)]
+struct PendingQuestion {
+    id: String,
+    question: String,
+    options: Option<Vec<codex_app_server_protocol::ToolRequestUserInputOption>>,
 }
 
 impl PendingRequest {
@@ -1615,12 +1623,13 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     let _ = self.codex.reject_server_request(request_id).await;
                     return;
                 }
-                let [question] = params.questions.as_slice() else {
+                if params.questions.is_empty() {
                     let _ = self.codex.reject_server_request(request_id).await;
-                    self.send("[codex] This tool asked multiple questions, which WhatsApp v1 cannot render.").await;
+                    self.send("[codex] This tool did not provide a question.")
+                        .await;
                     return;
-                };
-                if question.is_secret {
+                }
+                if params.questions.iter().any(|question| question.is_secret) {
                     let _ = self.codex.reject_server_request(request_id).await;
                     self.send(
                         "[codex] A secret answer was requested and cannot be sent over WhatsApp.",
@@ -1628,30 +1637,25 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     .await;
                     return;
                 }
+                let questions = params
+                    .questions
+                    .into_iter()
+                    .map(|question| PendingQuestion {
+                        id: question.id,
+                        question: question.question,
+                        options: question.options,
+                    })
+                    .collect::<Vec<_>>();
                 self.pending_requests.insert(
                     token.clone(),
                     PendingRequest::UserInput {
                         request_id,
-                        question_id: question.id.clone(),
+                        questions,
+                        answers: HashMap::new(),
                         expires_at,
                     },
                 );
-                let options = question
-                    .options
-                    .as_ref()
-                    .map_or_else(String::new, |options| {
-                        let rendered = options
-                            .iter()
-                            .map(|option| format!("• {} — {}", option.label, option.description))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        format!("\nOptions:\n{rendered}")
-                    });
-                self.send(&format!(
-                    "[codex] Question {token}: {}{}\nReply `/answer {token} <your answer>`.",
-                    question.question, options,
-                ))
-                .await;
+                self.send_user_question(&token, 0).await;
             }
             ServerRequest::PermissionsRequestApproval { request_id, params } => {
                 if !self.is_active_request(&params.thread_id, &params.turn_id) {
@@ -1821,16 +1825,33 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
         };
         let PendingRequest::UserInput {
             request_id,
-            question_id,
+            questions,
+            mut answers,
             ..
         } = request;
+        let question_index = answers.len();
+        let Some(question) = questions.get(question_index) else {
+            self.send("[codex] That question token is unknown or expired.")
+                .await;
+            return;
+        };
+        answers.insert(question.id.clone(), vec![answer]);
+        if question_index + 1 < questions.len() {
+            if let Some(PendingRequest::UserInput {
+                answers: pending_answers,
+                ..
+            }) = self.pending_requests.get_mut(token)
+            {
+                *pending_answers = answers;
+            }
+            self.send_user_question(token, question_index + 1).await;
+            return;
+        }
         let response = ToolRequestUserInputResponse {
-            answers: HashMap::from([(
-                question_id,
-                ToolRequestUserInputAnswer {
-                    answers: vec![answer],
-                },
-            )]),
+            answers: answers
+                .into_iter()
+                .map(|(question_id, answers)| (question_id, ToolRequestUserInputAnswer { answers }))
+                .collect(),
         };
         if let Ok(result) = serde_json::to_value(response) {
             if self
@@ -1845,6 +1866,35 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                 self.send("[codex] Could not deliver that answer.").await;
             }
         }
+    }
+
+    async fn send_user_question(&mut self, token: &str, question_index: usize) {
+        let Some(PendingRequest::UserInput { questions, .. }) = self.pending_requests.get(token)
+        else {
+            return;
+        };
+        let Some(question) = questions.get(question_index) else {
+            return;
+        };
+        let options = question
+            .options
+            .as_ref()
+            .map_or_else(String::new, |options| {
+                let rendered = options
+                    .iter()
+                    .map(|option| format!("• {} — {}", option.label, option.description))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("\nOptions:\n{rendered}")
+            });
+        self.send(&format!(
+            "[codex] Question {}/{} ({token}): {}{}\nReply `/answer {token} <your answer>`. ",
+            question_index + 1,
+            questions.len(),
+            question.question,
+            options,
+        ))
+        .await;
     }
 
     async fn expire_pending_requests(&mut self) {

@@ -25,7 +25,8 @@ needs the host workspace mounted.
 
 The bridge reads the user-owned `[whatsapp]` table from Codex's normal
 `config.toml` and private generated state from
-`CODEX_HOME/whatsapp/runtime.json`. Users must not create Baileys transport credentials,
+`CODEX_HOME/whatsapp/runtime.json`; durable transcript delivery is kept in a sibling
+private journal. Users must not create Baileys transport credentials,
 session IDs, API keys, webhook URLs, or signing secrets manually.
 
 On first start, the bridge also creates the user-editable command catalogue at
@@ -105,9 +106,13 @@ The bridge-specific behavior is limited to:
 - `/whatsapp list-threads` and `/whatsapp attach <thread-id>`;
 - `/status` for bridge, app-server, and transport health;
 - `/stop`, `/help`, and the user-editable WhatsApp help catalogue;
-- `/answer <token> <answer>` for the existing requested-user-input limitation;
-- `[codex]` response labelling, output chunking/editing, webhook deduplication,
-  durable delivery, reconnect handling, and health/pairing endpoints.
+- `/answer <token> <answer>` for sequential `request_user_input` questions;
+- webhook deduplication, durable delivery, reconnect handling, and health/pairing
+  endpoints.
+
+Normal Codex transcript items are projected and delivered as they stream. Commentary,
+plans, reasoning summaries, tool activity, and final answers retain their item order;
+provider segmentation is lossless and does not add bridge prefixes or chunk labels.
 
 The bridge does not implement or advertise the TUI-only approval retry flow or
 the general TUI slash-command set. `/approve`, `/approve-session`, and `/deny`
@@ -128,7 +133,7 @@ Transport-specific thread selection uses:
 - `/whatsapp attach <thread-id>`.
 
 Inbound webhook delivery is durably deduplicated. Bridge-authored messages are
-excluded from inbound processing, queued output is bounded, and app-server
+excluded from inbound processing, projected delivery is bounded, and app-server
 reconnect attempts emit at most one outage notification for an affected
 prompt.
 

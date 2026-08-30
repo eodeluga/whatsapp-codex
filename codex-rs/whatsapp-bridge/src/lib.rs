@@ -6,7 +6,6 @@ pub mod commands;
 pub mod coordinator;
 pub mod health;
 mod notifications;
-pub mod output;
 pub mod state;
 pub mod transport;
 pub mod transport_webhook;
