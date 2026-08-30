@@ -34,6 +34,7 @@ impl ProviderAdapter for FakeAdapter {
             message_limit: 3,
             edit_support: self.edit_support,
             attachment_support: false,
+            supports_markdown: false,
             rich_interaction_support: false,
         }
     }

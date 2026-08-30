@@ -162,6 +162,7 @@ impl ProviderAdapter for HttpTransportClient {
             message_limit: MAX_TEXT_CHARS,
             edit_support: true,
             attachment_support: true,
+            supports_markdown: false,
             rich_interaction_support: false,
         }
     }

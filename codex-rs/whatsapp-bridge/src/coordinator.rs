@@ -787,13 +787,17 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
         &mut self,
         message: InboundMessage,
     ) -> Result<Option<AcceptedAction>, crate::state::StateError> {
+        let envelope = message.as_envelope();
         if !self.state_healthy {
             return Err(crate::state::StateError::Write);
         }
-        if self.state.was_processed(&message.idempotency_key) {
+        if self.state.was_processed(&envelope.idempotency_key) {
             return Ok(None);
         }
-        if self.state.was_sent_by_bridge(&message.message_id) {
+        if self
+            .state
+            .was_sent_by_bridge(envelope.provider_message_id.as_str())
+        {
             return Ok(None);
         }
         let attachment = message.attachment;
@@ -804,14 +808,14 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             | Some(InboundAttachment::Document { .. }) => None,
         };
         let command = if attachment.is_some() {
-            BridgeCommand::Prompt(message.body.clone())
+            BridgeCommand::Prompt(envelope.body.clone())
         } else {
-            parse_command(&message.body)
+            parse_command(&envelope.body)
         };
         let previous_state = self.state.clone();
         let now = unix_timestamp();
         self.state
-            .mark_processed(message.idempotency_key.clone(), now);
+            .mark_processed(envelope.idempotency_key.clone(), now);
         self.state
             .prune(now, self.dedupe_ttl_hours, self.dedupe_capacity);
         let action = match unsupported_attachment {

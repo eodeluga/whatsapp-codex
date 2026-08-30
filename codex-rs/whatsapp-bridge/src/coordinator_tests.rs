@@ -327,6 +327,7 @@ impl ProviderAdapter for FakeTransport {
             message_limit: 4_096,
             edit_support: true,
             attachment_support: true,
+            supports_markdown: false,
             rich_interaction_support: false,
         }
     }

@@ -84,6 +84,7 @@ pub struct ProviderCapabilities {
     pub message_limit: usize,
     pub edit_support: bool,
     pub attachment_support: bool,
+    pub supports_markdown: bool,
     pub rich_interaction_support: bool,
 }
 

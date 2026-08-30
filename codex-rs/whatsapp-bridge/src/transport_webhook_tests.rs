@@ -21,14 +21,27 @@ fn image_message_without_text_is_forwarded_with_attachment() {
         },
     };
 
+    let message = filter_inbound(event, "447700900000@c.us", |_| false).unwrap();
     assert_eq!(
-        filter_inbound(event, "447700900000@c.us", |_| false),
-        Some(InboundMessage {
+        message,
+        InboundMessage {
             idempotency_key: "event-1".to_string(),
             message_id: "message-1".to_string(),
             chat_id: "447700900000@c.us".to_string(),
             body: String::new(),
             attachment: Some(attachment),
-        })
+        }
+    );
+    let envelope = message.as_envelope();
+    assert_eq!(
+        envelope,
+        InboundEnvelope {
+            idempotency_key: "event-1".to_string(),
+            provider_message_id: ProviderMessageId::new("message-1"),
+            conversation_id: ProviderConversationId::new("447700900000@c.us"),
+            sender_id: "447700900000@c.us".to_string(),
+            body: String::new(),
+            attachments: vec![ProviderAttachment::new("image:image/jpeg")],
+        }
     );
 }
