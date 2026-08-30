@@ -2,9 +2,13 @@ use super::*;
 use codex_app_server_protocol::AgentMessageDeltaNotification;
 use codex_app_server_protocol::ErrorNotification;
 use codex_app_server_protocol::ItemCompletedNotification;
+use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadClosedNotification;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ToolRequestUserInputOption;
+use codex_app_server_protocol::ToolRequestUserInputParams;
+use codex_app_server_protocol::ToolRequestUserInputQuestion;
 use codex_app_server_protocol::TurnError;
 use codex_protocol::models::MessagePhase;
 use pretty_assertions::assert_eq;
@@ -116,4 +120,43 @@ fn retryable_errors_and_internal_lifecycle_are_suppressed() {
         thread_id: "thread-1".to_owned(),
     }));
     assert_eq!(lifecycle, vec![ProjectionEvent::Suppressed]);
+}
+
+#[test]
+fn user_input_requests_use_a_shared_semantic_presentation() {
+    let mut projector = TranscriptProjector::default();
+    let event = projector.apply_user_input_request(
+        &RequestId::String("request-1".to_owned()),
+        &ToolRequestUserInputParams {
+            thread_id: "thread-1".to_owned(),
+            turn_id: "turn-1".to_owned(),
+            item_id: "item-1".to_owned(),
+            questions: vec![ToolRequestUserInputQuestion {
+                id: "mode".to_owned(),
+                header: "Mode".to_owned(),
+                question: "Which mode?".to_owned(),
+                is_other: true,
+                is_secret: false,
+                options: Some(vec![ToolRequestUserInputOption {
+                    label: "Fast".to_owned(),
+                    description: "Use the fast mode".to_owned(),
+                }]),
+            }],
+            auto_resolution_ms: None,
+        },
+    );
+
+    let ProjectionEvent::Request(presentation) = event else {
+        panic!("expected a shared request presentation");
+    };
+    assert_eq!(presentation.request_id, "request-1");
+    assert_eq!(
+        presentation.key,
+        TranscriptKey::new("thread-1", "turn-1", "item-1")
+    );
+    assert_eq!(presentation.questions[0].id, "mode");
+    assert_eq!(
+        presentation.questions[0].options.as_ref().unwrap()[0].label,
+        "Fast"
+    );
 }

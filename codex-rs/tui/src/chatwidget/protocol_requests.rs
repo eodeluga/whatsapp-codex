@@ -11,6 +11,11 @@ impl ChatWidget {
         request: ServerRequest,
         replay_kind: Option<ReplayKind>,
     ) {
+        if let ServerRequest::ToolRequestUserInput { request_id, params } = &request {
+            self.transcript
+                .projector
+                .apply_user_input_request(request_id, params);
+        }
         let id = request.id().to_string();
         match request {
             ServerRequest::CommandExecutionRequestApproval { params, .. } => {

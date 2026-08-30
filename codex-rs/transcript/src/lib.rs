@@ -16,8 +16,10 @@ use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
 use codex_app_server_protocol::ReasoningTextDeltaNotification;
+use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ToolRequestUserInputParams;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::WarningNotification;
 use std::collections::HashMap;
@@ -27,12 +29,16 @@ pub use model::ProjectionEvent;
 pub use model::TranscriptEntry;
 pub use model::TranscriptKey;
 pub use model::TranscriptNotice;
+pub use model::UserInputOptionPresentation;
+pub use model::UserInputPresentation;
+pub use model::UserInputQuestionPresentation;
 
 /// Item-keyed, append-ordered projection of a Codex thread.
 #[derive(Debug, Default)]
 pub struct TranscriptProjector {
     entries: Vec<TranscriptEntry>,
     entry_indexes: HashMap<TranscriptKey, usize>,
+    user_input_requests: HashMap<TranscriptKey, UserInputPresentation>,
     next_revision: u64,
 }
 
@@ -123,6 +129,19 @@ impl TranscriptProjector {
 
     pub fn entries(&self) -> &[TranscriptEntry] {
         &self.entries
+    }
+
+    /// Registers an interactive request using the shared semantic shape.
+    /// Provider surfaces own reply tokens, persistence, and input controls.
+    pub fn apply_user_input_request(
+        &mut self,
+        request_id: &RequestId,
+        params: &ToolRequestUserInputParams,
+    ) -> ProjectionEvent {
+        let presentation = UserInputPresentation::from_request(request_id, params);
+        self.user_input_requests
+            .insert(presentation.key.clone(), presentation.clone());
+        ProjectionEvent::Request(Box::new(presentation))
     }
 
     /// Reconciles a resumed turn from its authoritative item list.

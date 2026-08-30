@@ -1,4 +1,6 @@
+use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ToolRequestUserInputParams;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -148,11 +150,77 @@ pub struct TranscriptNotice {
     pub text: String,
 }
 
+/// Provider-neutral semantic presentation for a `request_user_input` request.
+/// Consumers choose how to collect answers and expose reply controls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputPresentation {
+    pub key: TranscriptKey,
+    pub request_id: String,
+    pub questions: Vec<UserInputQuestionPresentation>,
+}
+
+impl UserInputPresentation {
+    pub fn from_request(request_id: &RequestId, params: &ToolRequestUserInputParams) -> Self {
+        Self {
+            key: TranscriptKey::new(&params.thread_id, &params.turn_id, &params.item_id),
+            request_id: request_id.to_string(),
+            questions: params
+                .questions
+                .iter()
+                .map(UserInputQuestionPresentation::from_protocol)
+                .collect(),
+        }
+    }
+}
+
+/// One question in a shared user-input presentation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputQuestionPresentation {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    pub is_other: bool,
+    pub is_secret: bool,
+    pub options: Option<Vec<UserInputOptionPresentation>>,
+}
+
+impl UserInputQuestionPresentation {
+    fn from_protocol(question: &codex_app_server_protocol::ToolRequestUserInputQuestion) -> Self {
+        Self {
+            id: question.id.clone(),
+            header: question.header.clone(),
+            question: question.question.clone(),
+            is_other: question.is_other,
+            is_secret: question.is_secret,
+            options: question.options.as_ref().map(|options| {
+                options
+                    .iter()
+                    .map(|option| UserInputOptionPresentation {
+                        label: option.label.clone(),
+                        description: option.description.clone(),
+                    })
+                    .collect()
+            }),
+        }
+    }
+}
+
+/// A selectable option in a shared user-input presentation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputOptionPresentation {
+    pub label: String,
+    pub description: String,
+}
+
 /// The result of classifying an app-server notification.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectionEvent {
     Entry(Box<TranscriptEntry>),
     Notice(TranscriptNotice),
+    Request(Box<UserInputPresentation>),
     /// The event is deliberately internal-only. It lets callers count and
     /// trace suppressed protocol additions without serializing them.
     Suppressed,

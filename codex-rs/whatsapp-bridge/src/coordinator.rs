@@ -1622,6 +1622,7 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     })
                     .await;
                 }
+                ProjectionEvent::Request(_) => {}
                 ProjectionEvent::Suppressed => {}
             }
         }
@@ -1715,13 +1716,29 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     .await;
                     return;
                 }
-                let questions = params
+                let ProjectionEvent::Request(presentation) = self
+                    .projector
+                    .apply_user_input_request(&request_id, &params)
+                else {
+                    unreachable!("user input projection always returns a request")
+                };
+                let questions = presentation
                     .questions
                     .into_iter()
                     .map(|question| PendingQuestion {
                         id: question.id,
                         question: question.question,
-                        options: question.options,
+                        options: question.options.map(|options| {
+                            options
+                                .into_iter()
+                                .map(|option| {
+                                    codex_app_server_protocol::ToolRequestUserInputOption {
+                                        label: option.label,
+                                        description: option.description,
+                                    }
+                                })
+                                .collect()
+                        }),
                     })
                     .collect::<Vec<_>>();
                 let persisted = PendingUserInput {
