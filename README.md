@@ -124,6 +124,11 @@ Private runtime data is stored under `~/.codex/whatsapp/`. There is no
 WhatsApp-specific workspace, required input prefix, transport API token, webhook
 URL, or Docker environment variable to configure.
 
+The bridge keeps projected outbound transcript state in a private durable
+delivery journal beside its runtime state. It is used to resume pending sends
+after a bridge restart; normal transcript content is not stored in the user
+editable command catalogue.
+
 The gateway creates a user-editable command and display catalogue at
 `~/.codex/whatsapp/commands.json` the first time it starts. This file contains
 the implemented WhatsApp controls, approval guidance, help headings and
@@ -229,6 +234,7 @@ Run targeted repository workflows from `codex-rs`:
 just fmt
 just test -p codex-config
 just test -p codex-transcript
+just test -p codex-messaging
 just test -p codex-tui
 just test -p codex-whatsapp-bridge
 ```
