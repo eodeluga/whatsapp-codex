@@ -15,6 +15,12 @@ impl ChatWidget {
             return;
         }
 
+        // Keep the shared semantic transcript projection in step with the
+        // existing TUI-specific HistoryCell renderer. This lets remote
+        // providers and the TUI consume the same item identity and lifecycle
+        // semantics while preserving the TUI's current visual behavior.
+        self.transcript.projector.apply(notification.clone());
+
         let from_replay = replay_kind.is_some();
         let is_resume_initial_replay =
             matches!(replay_kind, Some(ReplayKind::ResumeInitialMessages));

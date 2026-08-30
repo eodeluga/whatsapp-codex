@@ -4227,6 +4227,7 @@ dependencies = [
  "codex-shell-command",
  "codex-state",
  "codex-terminal-detection",
+ "codex-transcript",
  "codex-utils-absolute-path",
  "codex-utils-approval-presentation",
  "codex-utils-approval-presets",
