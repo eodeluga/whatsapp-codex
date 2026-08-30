@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryRecord {
     pub conversation_id: crate::ProviderConversationId,
+    #[serde(default)]
     pub generation: u64,
     pub key: TranscriptKey,
     pub origin: EntryOrigin,
@@ -28,6 +29,7 @@ pub struct DeliveryRecord {
     pub state: DeliveryState,
     pub provider_message_id: Option<ProviderMessageId>,
     pub attempts: u32,
+    #[serde(default)]
     pub coalesced_revisions: u64,
 }
 

@@ -249,3 +249,26 @@ fn journal_records_generation_and_coalesced_revision_count() {
     assert_eq!(journal.records[0].coalesced_revisions, 1);
     assert_eq!(journal.records[0].state, DeliveryState::Pending);
 }
+
+#[test]
+fn legacy_delivery_records_load_with_new_metadata_defaults() {
+    let record: DeliveryRecord = serde_json::from_value(serde_json::json!({
+        "conversationId": "chat",
+        "key": {
+            "threadId": "thread",
+            "turnId": "turn",
+            "itemId": "item"
+        },
+        "origin": "CodexTranscript",
+        "segment": 0,
+        "text": "hello",
+        "revision": 1,
+        "committed": true,
+        "state": "Sent",
+        "providerMessageId": "message",
+        "attempts": 0
+    }))
+    .unwrap();
+    assert_eq!(record.generation, 0);
+    assert_eq!(record.coalesced_revisions, 0);
+}
