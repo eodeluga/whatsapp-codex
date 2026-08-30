@@ -245,25 +245,19 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                 None
             }
         };
-        let legacy_failure = "[codex] Codex app-server is unavailable.";
-        if self
-            .state
-            .outbox
-            .iter()
-            .any(|message| message.body == legacy_failure)
-        {
-            self.state
-                .outbox
-                .retain(|message| message.body != legacy_failure);
-            if let Some(prompt) = self.state.queued_prompts.first_mut() {
-                prompt.failure_notified = true;
-            }
+        let discarded_legacy_messages = self.state.outbox.len();
+        if discarded_legacy_messages > 0 {
+            self.state.outbox.clear();
             if self.state.save(&self.state_path).is_err() {
                 self.state_healthy = false;
                 self.refresh_readiness();
+            } else {
+                self.send(&format!(
+                    "[codex] Discarded {discarded_legacy_messages} legacy queued message(s); new transcript delivery uses the experimental journal."
+                ))
+                .await;
             }
         }
-        let _ = self.flush_outbox().await;
         if self.app_server_connected && self.state.binding.is_some() {
             self.app_server_connected = self.resume_after_reconnect().await;
             self.refresh_readiness();
@@ -274,7 +268,6 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
         {
             self.advance_queue().await;
         }
-        let mut retry_outbox = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut recover_state = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut expire_requests = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut reconcile_turn_start = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -317,9 +310,6 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                                 self.advance_queue().await;
                             }
                         },
-                    },
-                    _ = retry_outbox.tick(), if !self.state.outbox.is_empty() => {
-                        let _ = self.flush_outbox().await;
                     },
                     _ = recover_state.tick(), if !self.state_healthy => {
                         self.recover_state_storage();
@@ -373,9 +363,6 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                             }
                         }
                     }
-                    _ = retry_outbox.tick(), if !self.state.outbox.is_empty() => {
-                        let _ = self.flush_outbox().await;
-                    },
                     _ = recover_state.tick(), if !self.state_healthy => {
                         self.recover_state_storage();
                     },
@@ -409,9 +396,6 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
         };
         self.transport_healthy = healthy;
         self.refresh_readiness();
-        if healthy && !self.state.outbox.is_empty() {
-            let _ = self.flush_outbox().await;
-        }
     }
 
     fn cleanup_stale_attachments(&self) {
@@ -695,9 +679,6 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                         .reject_server_request(approval.request_id().clone())
                         .await;
                 }
-                let _ =
-                    tokio::time::timeout(std::time::Duration::from_secs(10), self.flush_outbox())
-                        .await;
                 let _ = self.state.save(&self.state_path);
                 let _ =
                     tokio::time::timeout(std::time::Duration::from_secs(5), self.codex.shutdown())
