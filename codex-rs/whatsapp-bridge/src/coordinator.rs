@@ -794,8 +794,7 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
         };
         let previous_state = self.state.clone();
         let now = unix_timestamp();
-        self.state
-            .mark_processed(envelope.idempotency_key, now);
+        self.state.mark_processed(envelope.idempotency_key, now);
         self.state
             .prune(now, self.dedupe_ttl_hours, self.dedupe_capacity);
         let action = match unsupported_attachment {
