@@ -245,3 +245,7 @@ fn ensure_success(status: StatusCode) -> Result<(), TransportError> {
         _ => Err(TransportError::InvalidResponse),
     }
 }
+
+#[cfg(test)]
+#[path = "transport_tests.rs"]
+mod tests;
