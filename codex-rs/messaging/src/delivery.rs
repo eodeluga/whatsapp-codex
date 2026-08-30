@@ -10,6 +10,7 @@ use serde::Serialize;
 use std::future::Future;
 use std::path::PathBuf;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 /// Durable state for one provider segment.
@@ -17,6 +18,7 @@ use tokio::sync::mpsc;
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryRecord {
     pub conversation_id: crate::ProviderConversationId,
+    pub generation: u64,
     pub key: TranscriptKey,
     pub origin: EntryOrigin,
     pub segment: usize,
@@ -26,6 +28,7 @@ pub struct DeliveryRecord {
     pub state: DeliveryState,
     pub provider_message_id: Option<ProviderMessageId>,
     pub attempts: u32,
+    pub coalesced_revisions: u64,
 }
 
 /// Delivery state persisted for a segment.
@@ -118,8 +121,11 @@ impl DeliveryJournal {
                         record.text = text;
                         record.revision = intent.revision;
                         record.committed = intent.committed;
+                        record.generation = intent.generation;
                         if record.provider_message_id.is_some() {
                             record.state = DeliveryState::Pending;
+                            record.coalesced_revisions =
+                                record.coalesced_revisions.saturating_add(1);
                         }
                         changed += 1;
                     }
@@ -127,6 +133,7 @@ impl DeliveryJournal {
                 None => {
                     self.records.push(DeliveryRecord {
                         conversation_id: intent.conversation_id.clone(),
+                        generation: intent.generation,
                         key: intent.key.clone(),
                         origin: intent.origin,
                         segment,
@@ -136,6 +143,7 @@ impl DeliveryJournal {
                         state: DeliveryState::Pending,
                         provider_message_id: None,
                         attempts: 0,
+                        coalesced_revisions: 0,
                     });
                     changed += 1;
                 }
@@ -144,12 +152,12 @@ impl DeliveryJournal {
         changed
     }
 
-    fn next_pending_index(&self, edit_support: bool) -> Option<usize> {
+    fn next_pending_index(&self) -> Option<usize> {
         for (index, record) in self.records.iter().enumerate() {
             if record.state == DeliveryState::Sent {
                 continue;
             }
-            return (edit_support || record.committed).then_some(index);
+            return Some(index);
         }
         None
     }
@@ -275,13 +283,18 @@ where
                     match command {
                         DeliveryWorkerCommand::Apply(intent) => {
                             let key = intent.key.clone();
-                            self.journal
-                                .apply(intent, self.adapter.capabilities().message_limit);
+                            let capabilities = self.adapter.capabilities();
+                            self.journal.apply(intent, capabilities.message_limit);
                             if self.persist().await.is_err() {
                                 let _ = self.events.try_send(DeliveryWorkerEvent::StoreFailed);
                                 continue;
                             }
-                            let queue_depth = self.journal.records.len();
+                            let queue_depth = self
+                                .journal
+                                .records
+                                .iter()
+                                .filter(|record| record.state == DeliveryState::Pending)
+                                .count();
                             let _ = self
                                 .events
                                 .try_send(DeliveryWorkerEvent::Enqueued { key, queue_depth });
@@ -300,12 +313,19 @@ where
     }
 
     async fn deliver_pending(&mut self) {
-        while let Some(index) = self
-            .journal
-            .next_pending_index(self.adapter.capabilities().edit_support)
-        {
+        let capabilities = self.adapter.capabilities();
+        while let Some(index) = self.journal.next_pending_index() {
             let record = self.journal.records[index].clone();
-            if let Some(message_id) = record.provider_message_id.clone() {
+            if capabilities.edit_support
+                && let Some(message_id) = record.provider_message_id.clone()
+            {
+                let started = Instant::now();
+                tracing::debug!(
+                    key = ?record.key,
+                    segment = record.segment,
+                    revision = record.revision,
+                    "provider edit started"
+                );
                 match self
                     .adapter
                     .edit_text(
@@ -316,7 +336,15 @@ where
                     .await
                 {
                     Ok(()) => {
+                        tracing::debug!(
+                            key = ?record.key,
+                            segment = record.segment,
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            "provider edit finished"
+                        );
                         self.journal.records[index].state = DeliveryState::Sent;
+                        let coalesced_revisions = self.journal.records[index].coalesced_revisions;
+                        self.journal.records[index].coalesced_revisions = 0;
                         if self.persist().await.is_err() {
                             let _ = self.events.try_send(DeliveryWorkerEvent::StoreFailed);
                             break;
@@ -324,21 +352,41 @@ where
                         let _ = self.events.try_send(DeliveryWorkerEvent::Edited {
                             key: record.key,
                             segment: record.segment,
-                            revisions: record.revision,
+                            revisions: coalesced_revisions,
                         });
                     }
                     Err(error) => {
+                        tracing::debug!(
+                            key = ?record.key,
+                            segment = record.segment,
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            "provider edit failed"
+                        );
                         self.failed(index, record, error).await;
                         break;
                     }
                 }
             } else {
+                let started = Instant::now();
+                tracing::debug!(
+                    key = ?record.key,
+                    segment = record.segment,
+                    revision = record.revision,
+                    generation = record.generation,
+                    "provider send started"
+                );
                 match self
                     .adapter
                     .send_text(record.conversation_id.clone(), record.text.clone())
                     .await
                 {
                     Ok(message_id) => {
+                        tracing::debug!(
+                            key = ?record.key,
+                            segment = record.segment,
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            "provider send finished"
+                        );
                         let event = DeliveryWorkerEvent::Sent {
                             key: record.key.clone(),
                             segment: record.segment,

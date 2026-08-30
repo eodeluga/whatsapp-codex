@@ -166,6 +166,7 @@ pub struct Coordinator<C, O> {
     command_catalog_path: PathBuf,
     projector: TranscriptProjector,
     delivery: Option<DeliveryWorkerHandle>,
+    delivery_generation: u64,
     file_change_paths: HashMap<(String, String, String), Vec<String>>,
     pending_requests: HashMap<String, PendingRequest>,
     pending_approvals: VecDeque<PendingApproval>,
@@ -213,6 +214,7 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             command_catalog_path,
             projector: TranscriptProjector::default(),
             delivery: None,
+            delivery_generation: 0,
             file_change_paths: HashMap::new(),
             pending_requests: HashMap::new(),
             pending_approvals: VecDeque::new(),
@@ -371,22 +373,31 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     },
                     _ = tokio::time::sleep(reconnect_delay_with_jitter(reconnect_delay)) => {
                         match self.codex.reconnect().await {
-                            Ok(()) if self.resume_after_reconnect().await => {
-                                connected = true;
-                                self.app_server_connected = true;
-                                reconnect_delay = std::time::Duration::from_secs(1);
-                                self.refresh_readiness();
-                                tracing::info!("connected to Codex app-server");
-                                if self.state.active_turn.is_none()
-                                    && !self.state.queued_prompts.is_empty()
-                                {
-                                    self.advance_queue().await;
-                                }
-                            }
                             Ok(()) => {
-                                tracing::warn!("connected to Codex app-server but thread resume failed");
-                                reconnect_delay =
-                                    (reconnect_delay * 2).min(LOCAL_RECOVERY_INTERVAL);
+                                self.delivery_generation =
+                                    self.delivery_generation.saturating_add(1);
+                                if self.resume_after_reconnect().await {
+                                    connected = true;
+                                    self.app_server_connected = true;
+                                    reconnect_delay = std::time::Duration::from_secs(1);
+                                    self.refresh_readiness();
+                                    tracing::info!(
+                                        generation = self.delivery_generation,
+                                        "connected to Codex app-server"
+                                    );
+                                    if self.state.active_turn.is_none()
+                                        && !self.state.queued_prompts.is_empty()
+                                    {
+                                        self.advance_queue().await;
+                                    }
+                                } else {
+                                    tracing::warn!(
+                                        generation = self.delivery_generation,
+                                        "connected to Codex app-server but thread resume failed"
+                                    );
+                                    reconnect_delay =
+                                        (reconnect_delay * 2).min(LOCAL_RECOVERY_INTERVAL);
+                                }
                             }
                             Err(error) => {
                                 tracing::debug!(%error, "Codex app-server reconnect attempt failed");
@@ -1538,6 +1549,7 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     };
                     self.enqueue_intent(DeliveryIntent {
                         conversation_id: ProviderConversationId::new(self.self_chat_id.clone()),
+                        generation: self.delivery_generation,
                         key: entry.key.clone(),
                         origin: entry.origin,
                         text,
@@ -1552,6 +1564,7 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                     }
                     self.enqueue_intent(DeliveryIntent {
                         conversation_id: ProviderConversationId::new(self.self_chat_id.clone()),
+                        generation: self.delivery_generation,
                         key: codex_transcript::TranscriptKey::new(
                             if notice.thread_id.is_empty() {
                                 "codex"
@@ -2043,6 +2056,7 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
         if let Some(delivery) = &self.delivery {
             let intent = DeliveryIntent {
                 conversation_id: ProviderConversationId::new(self.self_chat_id.clone()),
+                generation: self.delivery_generation,
                 key: codex_transcript::TranscriptKey::new("bridge", "notice", response_id),
                 origin: codex_transcript::EntryOrigin::BridgeNotice,
                 text,

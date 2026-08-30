@@ -135,6 +135,10 @@ pub trait ProviderAdapter: Send + Sync {
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryIntent {
     pub conversation_id: ProviderConversationId,
+    /// Identifies the app-server/provider session that produced this intent.
+    /// A reconnect can therefore be observed and reconciled without
+    /// confusing stale work with the current session.
+    pub generation: u64,
     pub key: TranscriptKey,
     pub origin: EntryOrigin,
     pub text: String,
