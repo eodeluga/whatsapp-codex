@@ -252,6 +252,53 @@ fn journal_records_generation_and_coalesced_revision_count() {
 }
 
 #[test]
+fn authoritative_shorter_revision_supersedes_stale_segments() {
+    let key = TranscriptKey::new("thread", "turn", "item");
+    let conversation_id = ProviderConversationId::new("chat");
+    let mut journal = DeliveryJournal::default();
+    journal.apply(
+        DeliveryIntent {
+            conversation_id: conversation_id.clone(),
+            generation: 0,
+            key: key.clone(),
+            origin: EntryOrigin::CodexTranscript,
+            text: "abcdef".to_string(),
+            revision: 1,
+            committed: false,
+        },
+        3,
+    );
+
+    journal.apply(
+        DeliveryIntent {
+            conversation_id: conversation_id.clone(),
+            generation: 0,
+            key: key.clone(),
+            origin: EntryOrigin::CodexTranscript,
+            text: "a".to_string(),
+            revision: 2,
+            committed: true,
+        },
+        3,
+    );
+    assert_eq!(journal.records[1].state, DeliveryState::Superseded);
+
+    journal.apply(
+        DeliveryIntent {
+            conversation_id,
+            generation: 0,
+            key,
+            origin: EntryOrigin::CodexTranscript,
+            text: "abcdef".to_string(),
+            revision: 3,
+            committed: true,
+        },
+        3,
+    );
+    assert_eq!(journal.records[1].state, DeliveryState::Pending);
+}
+
+#[test]
 fn legacy_delivery_records_load_with_new_metadata_defaults() {
     let record: DeliveryRecord = serde_json::from_value(serde_json::json!({
         "conversationId": "chat",

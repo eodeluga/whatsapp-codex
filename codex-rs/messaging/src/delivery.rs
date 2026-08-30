@@ -38,6 +38,7 @@ pub struct DeliveryRecord {
 pub enum DeliveryState {
     Pending,
     Sent,
+    Superseded,
 }
 
 /// A bounded, serializable delivery journal.
@@ -106,6 +107,7 @@ async fn set_private_permissions(path: &std::path::Path) -> std::io::Result<()> 
 impl DeliveryJournal {
     pub fn apply(&mut self, intent: DeliveryIntent, message_limit: usize) -> usize {
         let segments = segment_text(&intent.text, message_limit);
+        let segment_count = segments.len();
         let mut changed = 0;
         for (segment, text) in segments.into_iter().enumerate() {
             let existing = self.records.iter_mut().find(|record| {
@@ -124,6 +126,9 @@ impl DeliveryJournal {
                         record.revision = intent.revision;
                         record.committed = intent.committed;
                         record.generation = intent.generation;
+                        if record.state == DeliveryState::Superseded {
+                            record.state = DeliveryState::Pending;
+                        }
                         if record.provider_message_id.is_some() {
                             record.state = DeliveryState::Pending;
                             record.coalesced_revisions =
@@ -151,12 +156,23 @@ impl DeliveryJournal {
                 }
             }
         }
+        for record in &mut self.records {
+            if record.key == intent.key
+                && record.conversation_id == intent.conversation_id
+                && record.segment >= segment_count
+                && record.revision < intent.revision
+                && record.state == DeliveryState::Pending
+            {
+                record.state = DeliveryState::Superseded;
+                changed += 1;
+            }
+        }
         changed
     }
 
     fn next_pending_index(&self) -> Option<usize> {
         for (index, record) in self.records.iter().enumerate() {
-            if record.state == DeliveryState::Sent {
+            if record.state != DeliveryState::Pending {
                 continue;
             }
             return Some(index);
