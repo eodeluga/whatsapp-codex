@@ -521,6 +521,91 @@ async fn approval_notice_policy_preserves_permission_requests() {
     assert_eq!(coordinator.pending_approvals.len(), 1);
 }
 
+#[tokio::test]
+async fn turn_statuses_are_each_delivered_once() {
+    let directory = tempdir().unwrap();
+    let transport = FakeTransport::default();
+    let sent = Arc::clone(&transport.sent);
+    let readiness = Arc::new(BridgeReadiness::new(BridgeReadinessSnapshot {
+        ready: true,
+        state_healthy: true,
+        app_server_connected: true,
+        transport_healthy: true,
+    }));
+    let (command_catalog, command_catalog_path) =
+        CommandCatalog::load_or_create(directory.path()).unwrap();
+    let mut state = BridgeState::empty();
+    state.binding = Some(crate::state::ThreadBinding {
+        self_chat_id: "447700900000@c.us".to_string(),
+        codex_thread_id: "thread-1".to_string(),
+    });
+    state.active_turn = Some(crate::state::ActiveTurn {
+        inbound_message_id: "message-1".to_string(),
+        thread_id: "thread-1".to_string(),
+        codex_turn_id: "turn-1".to_string(),
+        legacy_working_output_message_id: None,
+        attachment_paths: Vec::new(),
+    });
+    let mut coordinator = Coordinator::new(
+        FakeCodex::default(),
+        transport.clone(),
+        state,
+        directory.path().join("state.json"),
+        directory.path().join("attachments"),
+        "447700900000".to_string(),
+        "447700900000@c.us".to_string(),
+        3_500,
+        1_500,
+        20,
+        100,
+        24,
+        command_catalog,
+        command_catalog_path,
+        readiness,
+        true,
+        true,
+    );
+    let (delivery_events, _delivery_event_rx) = mpsc::channel(16);
+    let delivery_worker = DeliveryWorker::new(
+        transport,
+        FileDeliveryStore::new(directory.path().join("delivery.json")),
+        delivery_events,
+        std::time::Duration::from_millis(1),
+    )
+    .await
+    .unwrap();
+    let (delivery, delivery_commands) =
+        DeliveryWorker::<FakeTransport, FileDeliveryStore>::channel(8);
+    coordinator.delivery = Some(delivery.clone());
+    let delivery_task = tokio::spawn(delivery_worker.run(delivery_commands));
+
+    for status in [
+        BridgeTurnStatus::Working,
+        BridgeTurnStatus::Reasoning,
+        BridgeTurnStatus::Tooling,
+    ] {
+        coordinator
+            .enqueue_turn_status(status, "thread-1", "turn-1")
+            .await;
+        coordinator
+            .enqueue_turn_status(status, "thread-1", "turn-1")
+            .await;
+    }
+
+    wait_for_sent(&sent, 3).await;
+    delivery.shutdown().await;
+    delivery_task.await.unwrap();
+
+    assert_eq!(
+        *sent.lock().unwrap(),
+        vec![
+            "[codex working...]".to_string(),
+            "[codex reasoning...]".to_string(),
+            "[codex tooling]".to_string(),
+        ]
+    );
+}
+
 #[derive(Clone, Default)]
 struct FakeTransport {
     sent: Arc<Mutex<Vec<String>>>,

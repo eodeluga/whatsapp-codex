@@ -44,9 +44,12 @@ use codex_messaging::FileDeliveryStore;
 use codex_messaging::ProviderAdapter;
 use codex_messaging::ProviderConversationId;
 use codex_messaging::segment_text;
+use codex_transcript::EntryOrigin;
 use codex_transcript::ProjectionEvent;
+use codex_transcript::TranscriptKey;
 use codex_transcript::TranscriptProjectionOptions;
 use codex_transcript::TranscriptProjector;
+use codex_transcript::item_is_tool_call;
 use codex_utils_approval_presentation::ApprovalDecision;
 use codex_utils_approval_presentation::ApprovalPresentation;
 use codex_utils_approval_presentation::command_execution_presentation;
@@ -69,6 +72,31 @@ const MAX_FILE_CHANGE_PATHS: usize = 128;
 const MAX_FILE_CHANGE_PATH_CHARS: usize = 512;
 const LOCAL_RECOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const ATTACHMENT_RETENTION: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+#[derive(Clone, Copy, Debug)]
+enum BridgeTurnStatus {
+    Working,
+    Reasoning,
+    Tooling,
+}
+
+impl BridgeTurnStatus {
+    const fn item_id(self) -> &'static str {
+        match self {
+            Self::Working => "bridge-status-working",
+            Self::Reasoning => "bridge-status-reasoning",
+            Self::Tooling => "bridge-status-tooling",
+        }
+    }
+
+    const fn text(self) -> &'static str {
+        match self {
+            Self::Working => "[codex working...]",
+            Self::Reasoning => "[codex reasoning...]",
+            Self::Tooling => "[codex tooling]",
+        }
+    }
+}
 
 pub enum CoordinatorCommand {
     Inbound {
@@ -1019,6 +1047,8 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             .await
         {
             Ok(turn_id) => {
+                let status_thread_id = thread_id.clone();
+                let status_turn_id = turn_id.clone();
                 self.state.queued_prompts.remove(0);
                 self.state.active_turn = Some(crate::state::ActiveTurn {
                     inbound_message_id: prompt.message_id,
@@ -1035,6 +1065,13 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                 if self.state.save(&self.state_path).is_err() {
                     self.state_healthy = false;
                     self.refresh_readiness();
+                } else {
+                    self.enqueue_turn_status(
+                        BridgeTurnStatus::Working,
+                        &status_thread_id,
+                        &status_turn_id,
+                    )
+                    .await;
                 }
             }
             Err(_) => {
@@ -1396,6 +1433,17 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             return;
         }
         let projection = self.projector.apply(notification.clone());
+        let (reasoning_status, tooling_status) = notification_statuses(&notification);
+        if let Some((thread_id, turn_id)) = notification_turn_scope(&notification) {
+            if reasoning_status {
+                self.enqueue_turn_status(BridgeTurnStatus::Reasoning, thread_id, turn_id)
+                    .await;
+            }
+            if tooling_status {
+                self.enqueue_turn_status(BridgeTurnStatus::Tooling, thread_id, turn_id)
+                    .await;
+            }
+        }
         if projection
             .iter()
             .any(|event| matches!(event, ProjectionEvent::Suppressed))
@@ -1586,6 +1634,32 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
                 ProjectionEvent::Suppressed => {}
             }
         }
+    }
+
+    async fn enqueue_turn_status(
+        &mut self,
+        status: BridgeTurnStatus,
+        thread_id: &str,
+        turn_id: &str,
+    ) {
+        if !self
+            .state
+            .active_turn
+            .as_ref()
+            .is_some_and(|active| active.thread_id == thread_id && active.codex_turn_id == turn_id)
+        {
+            return;
+        }
+        self.enqueue_intent(DeliveryIntent {
+            conversation_id: ProviderConversationId::new(self.self_chat_id.clone()),
+            generation: self.delivery_generation,
+            key: TranscriptKey::new(thread_id, turn_id, status.item_id()),
+            origin: EntryOrigin::BridgeNotice,
+            text: status.text().to_string(),
+            revision: 1,
+            committed: true,
+        })
+        .await;
     }
 
     async fn enqueue_intent(&mut self, intent: DeliveryIntent) {
@@ -2158,6 +2232,69 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             },
             self.state.queued_prompts.len(),
         )
+    }
+}
+
+fn notification_turn_scope(notification: &ServerNotification) -> Option<(&str, &str)> {
+    match notification {
+        ServerNotification::AgentMessageDelta(notification) => {
+            Some((&notification.thread_id, &notification.turn_id))
+        }
+        ServerNotification::PlanDelta(notification) => {
+            Some((&notification.thread_id, &notification.turn_id))
+        }
+        ServerNotification::ReasoningSummaryTextDelta(notification) => {
+            Some((&notification.thread_id, &notification.turn_id))
+        }
+        ServerNotification::ReasoningTextDelta(notification) => {
+            Some((&notification.thread_id, &notification.turn_id))
+        }
+        ServerNotification::CommandExecutionOutputDelta(notification) => {
+            Some((&notification.thread_id, &notification.turn_id))
+        }
+        ServerNotification::FileChangeOutputDelta(notification) => {
+            Some((&notification.thread_id, &notification.turn_id))
+        }
+        ServerNotification::FileChangePatchUpdated(notification) => {
+            Some((&notification.thread_id, &notification.turn_id))
+        }
+        ServerNotification::ItemStarted(notification) => {
+            Some((&notification.thread_id, &notification.turn_id))
+        }
+        ServerNotification::ItemCompleted(notification) => {
+            Some((&notification.thread_id, &notification.turn_id))
+        }
+        ServerNotification::TurnCompleted(notification) => {
+            Some((&notification.thread_id, &notification.turn.id))
+        }
+        _ => None,
+    }
+}
+
+fn notification_statuses(notification: &ServerNotification) -> (bool, bool) {
+    match notification {
+        ServerNotification::ReasoningSummaryTextDelta(_)
+        | ServerNotification::ReasoningTextDelta(_) => (true, false),
+        ServerNotification::CommandExecutionOutputDelta(_)
+        | ServerNotification::FileChangeOutputDelta(_)
+        | ServerNotification::FileChangePatchUpdated(_) => (false, true),
+        ServerNotification::ItemStarted(notification) => (
+            matches!(&notification.item, ThreadItem::Reasoning { .. }),
+            item_is_tool_call(&notification.item),
+        ),
+        ServerNotification::ItemCompleted(notification) => (
+            matches!(&notification.item, ThreadItem::Reasoning { .. }),
+            item_is_tool_call(&notification.item),
+        ),
+        ServerNotification::TurnCompleted(notification) => (
+            notification
+                .turn
+                .items
+                .iter()
+                .any(|item| matches!(item, ThreadItem::Reasoning { .. })),
+            notification.turn.items.iter().any(item_is_tool_call),
+        ),
+        _ => (false, false),
     }
 }
 

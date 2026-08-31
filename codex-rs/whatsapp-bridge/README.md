@@ -47,6 +47,11 @@ remain available regardless of `include_approval_notices`. With approval
 notices disabled, command and file-change approval requests are rejected rather
 than left waiting for an invisible reply.
 
+For every active turn, the bridge may also emit these provider-neutral short
+statuses, at most once each: `[codex working...]`, `[codex reasoning...]`, and
+`[codex tooling]`. Repeated reasoning steps, tool events, reconnects, and
+transcript revisions do not duplicate them.
+
 On first start, the bridge also creates the user-editable command catalogue at
 `CODEX_HOME/whatsapp/commands.json`. `/help` and `/` reload that file, so help
 grouping, footer text, approval guidance, and the outbound response prefix can

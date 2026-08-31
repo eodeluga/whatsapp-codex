@@ -143,6 +143,11 @@ are not controlled by `include_approval_notices`. When approval notices are
 disabled, command and file-change approval requests are rejected rather than
 left waiting for an invisible reply.
 
+Each active turn also emits a provider-neutral bridge status at most once per
+category: `[codex working...]`, `[codex reasoning...]`, and `[codex tooling]`.
+Repeated reasoning steps, tool events, reconnects, and transcript revisions do
+not repeat these statuses.
+
 The bridge keeps projected outbound transcript state in a private durable
 delivery journal beside its runtime state. It is used to resume pending sends
 after a bridge restart; normal transcript content is not stored in the user

@@ -597,7 +597,10 @@ impl TranscriptProjector {
     }
 }
 
-fn item_is_tool_call(item: &ThreadItem) -> bool {
+/// Returns whether an item represents tool activity rather than transcript
+/// text. Bridges use this shared classification to emit provider-neutral
+/// tooling status without exposing provider-specific protocol details.
+pub fn item_is_tool_call(item: &ThreadItem) -> bool {
     matches!(
         item,
         ThreadItem::CommandExecution { .. }
