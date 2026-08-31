@@ -1,4 +1,4 @@
-import makeWASocket, { Browsers, DisconnectReason, downloadContentFromMessage, makeCacheableSignalKeyStore, toBuffer, useMultiFileAuthState } from "@whiskeysockets/baileys";
+import makeWASocket, { Browsers, DisconnectReason, downloadContentFromMessage, generateMessageIDV2, makeCacheableSignalKeyStore, toBuffer, useMultiFileAuthState } from "@whiskeysockets/baileys";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, rm, unlink } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
@@ -189,8 +189,29 @@ const server = http.createServer((request, response) => {
         if (raw.length > 64 * 1024) return reply(response, 413, {});
       }
       const body = JSON.parse(raw);
-      if (request.method === "POST" && request.url === "/v1/messages" && status === "ready") { const sent = await socket.sendMessage(body.chatId, { text: body.text }); rememberOutboundMessage(sent.key.id); return reply(response, 201, { id: sent.key.id }); }
-      if (request.method === "POST" && request.url === "/v1/messages/edit" && status === "ready") { await socket.sendMessage(body.chatId, { text: body.text }, { edit: { fromMe: true, id: body.messageId, remoteJid: body.chatId } }); rememberOutboundMessage(body.messageId); return reply(response, 204, {}); }
+      if (request.method === "POST" && request.url === "/v1/messages" && status === "ready") {
+        const messageId = generateMessageIDV2(socket.user?.id);
+        rememberOutboundMessage(messageId);
+        try {
+          const sent = await socket.sendMessage(body.chatId, { text: body.text }, { messageId });
+          return reply(response, 201, { id: sent.key.id });
+        } catch (error) {
+          recentOutboundMessageIds.delete(messageId);
+          throw error;
+        }
+      }
+      if (request.method === "POST" && request.url === "/v1/messages/edit" && status === "ready") {
+        const messageId = generateMessageIDV2(socket.user?.id);
+        rememberOutboundMessage(messageId);
+        rememberOutboundMessage(body.messageId);
+        try {
+          await socket.sendMessage(body.chatId, { edit: { fromMe: true, id: body.messageId, remoteJid: body.chatId }, text: body.text }, { messageId });
+          return reply(response, 204, {});
+        } catch (error) {
+          recentOutboundMessageIds.delete(messageId);
+          throw error;
+        }
+      }
       return reply(response, 409, {});
     } catch (error) {
       console.log(JSON.stringify({ event: "http.request_failed", path: request.url, error: String(error) }));
