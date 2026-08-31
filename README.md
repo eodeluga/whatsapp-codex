@@ -98,9 +98,11 @@ behavior is limited to the transport and these bridge operations:
 - `/answer <token> <answer>` for sequential `request_user_input` questions.
 
 Plain text during an active steerable turn uses `turn/steer`. Transcript items
-are mirrored through the shared semantic projector as they stream; WhatsApp
-only segments content at its provider limit and does not add normal-output
-prefixes or chunk labels. Approval choices
+are mirrored through the shared semantic projector as they stream. Commentary,
+plans, and final answers are delivered by default; reasoning summaries and
+tool-call activity require the shared `[bridge]` options. WhatsApp only
+segments content at its provider limit and does not add normal-output prefixes
+or chunk labels. Approval choices
 have no user-visible IDs and are exactly the choices supplied by Codex. An
 automatic review may accept an action without showing a WhatsApp prompt;
 `Decline` lets the turn continue, while `Cancel` interrupts it. Reply with the
@@ -118,6 +120,12 @@ usually `~/.codex/config.toml`:
 onboarding_complete = true
 enabled = true
 account_phone_number = "+447700900000"
+
+[bridge]
+# All three options default to false when omitted.
+include_reasoning = false
+include_tool_calls = false
+include_approval_notices = false
 ```
 
 Private runtime data is stored under `~/.codex/whatsapp/`. There is no
@@ -127,6 +135,13 @@ URL, or Docker environment variable to configure.
 Message limits and edit behavior are supplied by the WhatsApp adapter and
 durable delivery worker; the old runtime chunk/edit tuning fields are accepted
 only when reading an existing runtime file and are omitted when it is rewritten.
+
+The top-level `[bridge]` options are shared by every remote provider adapter.
+Reasoning output, tool-call activity, and command/file-change approval notices
+are allowlisted but off by default. Permission requests remain available and
+are not controlled by `include_approval_notices`. When approval notices are
+disabled, command and file-change approval requests are rejected rather than
+left waiting for an invisible reply.
 
 The bridge keeps projected outbound transcript state in a private durable
 delivery journal beside its runtime state. It is used to resume pending sends

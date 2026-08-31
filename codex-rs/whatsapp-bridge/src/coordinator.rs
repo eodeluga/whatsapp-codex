@@ -45,6 +45,7 @@ use codex_messaging::ProviderAdapter;
 use codex_messaging::ProviderConversationId;
 use codex_messaging::segment_text;
 use codex_transcript::ProjectionEvent;
+use codex_transcript::TranscriptProjectionOptions;
 use codex_transcript::TranscriptProjector;
 use codex_utils_approval_presentation::ApprovalDecision;
 use codex_utils_approval_presentation::ApprovalPresentation;
@@ -166,6 +167,7 @@ pub struct Coordinator<C, O> {
     command_catalog: CommandCatalog,
     command_catalog_path: PathBuf,
     projector: TranscriptProjector,
+    include_approval_notices: bool,
     delivery: Option<DeliveryWorkerHandle>,
     delivery_generation: u64,
     file_change_paths: HashMap<(String, String, String), Vec<String>>,
@@ -214,6 +216,7 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             command_catalog,
             command_catalog_path,
             projector: TranscriptProjector::default(),
+            include_approval_notices: false,
             delivery: None,
             delivery_generation: 0,
             file_change_paths: HashMap::new(),
@@ -226,6 +229,19 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             stream_degraded: false,
             resume_failures: 0,
         }
+    }
+
+    /// Configures the transcript categories exposed to every provider adapter.
+    pub fn with_transcript_options(mut self, options: TranscriptProjectionOptions) -> Self {
+        self.projector = TranscriptProjector::new(options);
+        self
+    }
+
+    /// Enables or disables command and file-change approval notices.
+    /// Permission requests remain available regardless of this setting.
+    pub fn with_approval_notices(mut self, enabled: bool) -> Self {
+        self.include_approval_notices = enabled;
+        self
     }
 
     pub async fn run(mut self, mut commands: mpsc::Receiver<CoordinatorCommand>) {
@@ -1750,6 +1766,15 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
     }
 
     async fn enqueue_approval(&mut self, approval: PendingApproval) {
+        if !self.include_approval_notices
+            && !matches!(&approval, PendingApproval::Permissions { .. })
+        {
+            let _ = self
+                .codex
+                .reject_server_request(approval.request_id().clone())
+                .await;
+            return;
+        }
         let display = self.pending_approvals.is_empty();
         self.pending_approvals.push_back(approval);
         if display {

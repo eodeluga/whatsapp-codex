@@ -10,8 +10,10 @@ use axum::http::StatusCode;
 use axum::response::Html;
 use axum::routing::get;
 use axum::routing::post;
+use codex_config::load_user_bridge_config;
 use codex_config::load_user_whatsapp_config;
 use codex_config::load_whatsapp_runtime_config;
+use codex_transcript::TranscriptProjectionOptions;
 use codex_whatsapp_bridge::CommandCatalog;
 use codex_whatsapp_bridge::codex::CodexClient;
 use codex_whatsapp_bridge::codex::RemoteCodexClient;
@@ -56,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
     let Some(config) = load_user_whatsapp_config(&config_path)? else {
         anyhow::bail!("[whatsapp] is not configured");
     };
+    let bridge_config = load_user_bridge_config(&config_path)?.unwrap_or_default();
     if !config.enabled {
         return Ok(());
     }
@@ -154,6 +157,11 @@ async fn main() -> anyhow::Result<()> {
             app_server_connected,
             transport_healthy,
         )
+        .with_transcript_options(TranscriptProjectionOptions {
+            include_reasoning: bridge_config.include_reasoning,
+            include_tool_calls: bridge_config.include_tool_calls,
+        })
+        .with_approval_notices(bridge_config.include_approval_notices)
         .run(command_rx),
     );
     let app = Router::new()

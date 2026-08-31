@@ -352,6 +352,28 @@
       },
       "type": "object"
     },
+    "BridgeConfigToml": {
+      "additionalProperties": false,
+      "description": "Top-level `[bridge]` settings shared by every remote provider adapter.",
+      "properties": {
+        "include_approval_notices": {
+          "default": false,
+          "description": "Include command and file-change approval notices in remote output. Permission requests are not controlled by this setting.",
+          "type": "boolean"
+        },
+        "include_reasoning": {
+          "default": false,
+          "description": "Include reasoning summaries and raw reasoning content in remote output.",
+          "type": "boolean"
+        },
+        "include_tool_calls": {
+          "default": false,
+          "description": "Include tool calls and tool activity in remote output.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "BundledSkillsConfig": {
       "additionalProperties": false,
       "properties": {
@@ -4904,6 +4926,15 @@
       "format": "uint64",
       "minimum": 0.0,
       "type": "integer"
+    },
+    "bridge": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/BridgeConfigToml"
+        }
+      ],
+      "default": null,
+      "description": "Settings shared by remote bridge provider adapters."
     },
     "chatgpt_base_url": {
       "description": "Base URL for requests to ChatGPT (as opposed to the OpenAI API).",

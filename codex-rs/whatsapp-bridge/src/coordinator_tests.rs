@@ -21,6 +21,7 @@ use codex_transcript::EntryOrigin;
 use codex_transcript::ProjectionEvent;
 use codex_transcript::TranscriptEntry;
 use codex_transcript::TranscriptKey;
+use pretty_assertions::assert_eq;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -364,6 +365,7 @@ async fn wait_for_sent(sent: &Arc<Mutex<Vec<String>>>, count: usize) {
 struct FakeCodex {
     turns: Arc<Mutex<Vec<(String, String, String)>>>,
     steers: Arc<Mutex<Vec<(String, String, String, String)>>>,
+    rejects: Arc<Mutex<Vec<RequestId>>>,
     resolves: Arc<Mutex<Vec<serde_json::Value>>>,
     start_thread_fails: Arc<AtomicBool>,
 }
@@ -434,7 +436,8 @@ impl CodexClient for FakeCodex {
         std::future::pending().await
     }
 
-    async fn reject_server_request(&self, _request_id: RequestId) -> Result<(), CodexError> {
+    async fn reject_server_request(&self, request_id: RequestId) -> Result<(), CodexError> {
+        self.rejects.lock().unwrap().push(request_id);
         Ok(())
     }
 
@@ -454,6 +457,68 @@ impl CodexClient for FakeCodex {
     async fn shutdown(&mut self) -> Result<(), CodexError> {
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn approval_notice_policy_preserves_permission_requests() {
+    let directory = tempdir().unwrap();
+    let (command_catalog, command_catalog_path) =
+        CommandCatalog::load_or_create(directory.path()).unwrap();
+    let readiness = Arc::new(BridgeReadiness::new(BridgeReadinessSnapshot {
+        ready: true,
+        state_healthy: true,
+        app_server_connected: true,
+        transport_healthy: true,
+    }));
+    let codex = FakeCodex::default();
+    let rejects = Arc::clone(&codex.rejects);
+    let mut coordinator = Coordinator::new(
+        codex,
+        FakeTransport::default(),
+        BridgeState::empty(),
+        directory.path().join("state.json"),
+        directory.path().join("attachments"),
+        "447700900000".to_string(),
+        "447700900000@c.us".to_string(),
+        3_500,
+        1_500,
+        20,
+        100,
+        24,
+        command_catalog,
+        command_catalog_path,
+        readiness,
+        true,
+        true,
+    );
+
+    coordinator
+        .enqueue_approval(PendingApproval::FileChange {
+            request_id: RequestId::String("file-change-request".to_string()),
+            presentation: ApprovalPresentation {
+                title: "File change".to_string(),
+                details: Vec::new(),
+                choices: Vec::new(),
+            },
+        })
+        .await;
+    assert!(coordinator.pending_approvals.is_empty());
+    assert_eq!(
+        rejects.lock().unwrap().as_slice(),
+        &[RequestId::String("file-change-request".to_string())]
+    );
+
+    coordinator
+        .enqueue_approval(PendingApproval::Permissions {
+            request_id: RequestId::String("permissions-request".to_string()),
+            presentation: ApprovalPresentation {
+                title: "Permissions".to_string(),
+                details: Vec::new(),
+                choices: Vec::new(),
+            },
+        })
+        .await;
+    assert_eq!(coordinator.pending_approvals.len(), 1);
 }
 
 #[derive(Clone, Default)]

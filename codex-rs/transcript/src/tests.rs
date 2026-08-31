@@ -3,6 +3,8 @@ use codex_app_server_protocol::AgentMessageDeltaNotification;
 use codex_app_server_protocol::ErrorNotification;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
+use codex_app_server_protocol::PatchApplyStatus;
+use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadClosedNotification;
@@ -153,6 +155,58 @@ fn retryable_errors_and_internal_lifecycle_are_suppressed() {
         thread_id: "thread-1".to_owned(),
     }));
     assert_eq!(lifecycle, vec![ProjectionEvent::Suppressed]);
+}
+
+#[test]
+fn reasoning_is_allowlisted_but_disabled_by_default() {
+    let notification =
+        ServerNotification::ReasoningSummaryTextDelta(ReasoningSummaryTextDeltaNotification {
+            thread_id: "thread-1".to_owned(),
+            turn_id: "turn-1".to_owned(),
+            item_id: "reasoning-1".to_owned(),
+            delta: "summary".to_owned(),
+            summary_index: 0,
+        });
+    assert_eq!(
+        TranscriptProjector::default().apply(notification.clone()),
+        vec![ProjectionEvent::Suppressed]
+    );
+
+    let mut projector = TranscriptProjector::new(TranscriptProjectionOptions {
+        include_reasoning: true,
+        include_tool_calls: false,
+    });
+    let events = projector.apply(notification);
+    assert!(matches!(events.as_slice(), [ProjectionEvent::Entry(_)]));
+    assert_eq!(
+        projector.entries()[0].plain_text().as_deref(),
+        Some("summary")
+    );
+}
+
+#[test]
+fn tool_calls_are_allowlisted_but_disabled_by_default() {
+    let tool_call = ThreadItem::FileChange {
+        id: "file-change-1".to_owned(),
+        changes: Vec::new(),
+        status: PatchApplyStatus::InProgress,
+    };
+    assert!(
+        TranscriptProjector::default()
+            .reconcile_items("thread-1", "turn-1", std::slice::from_ref(&tool_call))
+            .is_empty()
+    );
+
+    let mut projector = TranscriptProjector::new(TranscriptProjectionOptions {
+        include_reasoning: false,
+        include_tool_calls: true,
+    });
+    let events = projector.reconcile_items("thread-1", "turn-1", &[tool_call]);
+    assert!(matches!(events.as_slice(), [ProjectionEvent::Entry(_)]));
+    assert_eq!(
+        projector.entries()[0].plain_text().as_deref(),
+        Some("file changes: InProgress · 0 changes")
+    );
 }
 
 #[test]

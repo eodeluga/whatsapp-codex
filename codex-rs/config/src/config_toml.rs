@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::HooksToml;
+use crate::bridge::BridgeConfigToml;
 use crate::permissions_toml::PermissionsToml;
 use crate::profile_toml::ConfigProfile;
 use crate::types::AnalyticsConfigToml;
@@ -493,6 +494,10 @@ pub struct ConfigToml {
     /// Opaque desktop settings stored alongside the rest of config.toml.
     #[serde(default)]
     pub desktop: Option<HashMap<String, JsonValue>>,
+
+    /// Settings shared by remote bridge provider adapters.
+    #[serde(default)]
+    pub bridge: Option<BridgeConfigToml>,
 
     /// Self-hosted WhatsApp bridge settings. These are accepted only from the
     /// base user config layer.

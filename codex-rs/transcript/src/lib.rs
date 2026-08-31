@@ -34,9 +34,21 @@ pub use model::UserInputOptionPresentation;
 pub use model::UserInputPresentation;
 pub use model::UserInputQuestionPresentation;
 
+/// Controls optional transcript categories emitted by the projector.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TranscriptProjectionOptions {
+    /// Include reasoning summaries and raw reasoning content in the projection.
+    /// The default is false because reasoning is not normally provider output.
+    pub include_reasoning: bool,
+    /// Include tool calls and tool activity in the projection.
+    /// The default is false because tool execution is not normally provider output.
+    pub include_tool_calls: bool,
+}
+
 /// Item-keyed, append-ordered projection of a Codex thread.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TranscriptProjector {
+    options: TranscriptProjectionOptions,
     entries: Vec<TranscriptEntry>,
     entry_indexes: HashMap<TranscriptKey, usize>,
     user_input_requests: HashMap<TranscriptKey, UserInputPresentation>,
@@ -44,7 +56,24 @@ pub struct TranscriptProjector {
     next_revision: u64,
 }
 
+impl Default for TranscriptProjector {
+    fn default() -> Self {
+        Self::new(TranscriptProjectionOptions::default())
+    }
+}
+
 impl TranscriptProjector {
+    pub fn new(options: TranscriptProjectionOptions) -> Self {
+        Self {
+            options,
+            entries: Vec::new(),
+            entry_indexes: HashMap::new(),
+            user_input_requests: HashMap::new(),
+            error_notices: HashMap::new(),
+            next_revision: 0,
+        }
+    }
+
     /// Applies one app-server notification and returns only newly-created or
     /// changed user-visible projection events.
     pub fn apply(&mut self, notification: ServerNotification) -> Vec<ProjectionEvent> {
@@ -76,26 +105,46 @@ impl TranscriptProjector {
                 )
                 .into_iter()
                 .collect(),
-            ServerNotification::ReasoningSummaryTextDelta(notification) => self
-                .apply_reasoning_delta(notification, ReasoningPart::Summary)
-                .into_iter()
-                .collect(),
-            ServerNotification::ReasoningTextDelta(notification) => self
-                .apply_reasoning_delta(notification, ReasoningPart::Content)
-                .into_iter()
-                .collect(),
-            ServerNotification::CommandExecutionOutputDelta(notification) => self
-                .apply_command_output_delta(notification)
-                .into_iter()
-                .collect(),
-            ServerNotification::FileChangeOutputDelta(notification) => self
-                .apply_file_change_output_delta(notification)
-                .into_iter()
-                .collect(),
-            ServerNotification::FileChangePatchUpdated(notification) => self
-                .apply_file_change_patch_updated(notification)
-                .into_iter()
-                .collect(),
+            ServerNotification::ReasoningSummaryTextDelta(notification)
+                if self.options.include_reasoning =>
+            {
+                self.apply_reasoning_delta(notification, ReasoningPart::Summary)
+                    .into_iter()
+                    .collect()
+            }
+            ServerNotification::ReasoningTextDelta(notification)
+                if self.options.include_reasoning =>
+            {
+                self.apply_reasoning_delta(notification, ReasoningPart::Content)
+                    .into_iter()
+                    .collect()
+            }
+            ServerNotification::ReasoningSummaryTextDelta(_)
+            | ServerNotification::ReasoningTextDelta(_) => vec![ProjectionEvent::Suppressed],
+            ServerNotification::CommandExecutionOutputDelta(notification)
+                if self.options.include_tool_calls =>
+            {
+                self.apply_command_output_delta(notification)
+                    .into_iter()
+                    .collect()
+            }
+            ServerNotification::FileChangeOutputDelta(notification)
+                if self.options.include_tool_calls =>
+            {
+                self.apply_file_change_output_delta(notification)
+                    .into_iter()
+                    .collect()
+            }
+            ServerNotification::FileChangePatchUpdated(notification)
+                if self.options.include_tool_calls =>
+            {
+                self.apply_file_change_patch_updated(notification)
+                    .into_iter()
+                    .collect()
+            }
+            ServerNotification::CommandExecutionOutputDelta(_)
+            | ServerNotification::FileChangeOutputDelta(_)
+            | ServerNotification::FileChangePatchUpdated(_) => vec![ProjectionEvent::Suppressed],
             ServerNotification::TurnCompleted(notification) => {
                 self.apply_turn_completed(notification)
             }
@@ -515,6 +564,11 @@ impl TranscriptProjector {
         item: ThreadItem,
         committed: bool,
     ) -> Option<ProjectionEvent> {
+        if (!self.options.include_reasoning && matches!(&item, ThreadItem::Reasoning { .. }))
+            || (!self.options.include_tool_calls && item_is_tool_call(&item))
+        {
+            return None;
+        }
         if let Some(index) = self.entry_indexes.get(&key).copied() {
             let entry = &mut self.entries[index];
             if entry.committed && !committed {
@@ -541,6 +595,21 @@ impl TranscriptProjector {
         self.entries.push(entry.clone());
         Some(ProjectionEvent::Entry(Box::new(entry)))
     }
+}
+
+fn item_is_tool_call(item: &ThreadItem) -> bool {
+    matches!(
+        item,
+        ThreadItem::CommandExecution { .. }
+            | ThreadItem::FileChange { .. }
+            | ThreadItem::McpToolCall { .. }
+            | ThreadItem::DynamicToolCall { .. }
+            | ThreadItem::CollabAgentToolCall { .. }
+            | ThreadItem::SubAgentActivity { .. }
+            | ThreadItem::WebSearch(..)
+            | ThreadItem::ImageView { .. }
+            | ThreadItem::ImageGeneration(..)
+    )
 }
 
 fn notice_key(kind: &str, thread_id: &str, turn_id: &str, text: &str) -> TranscriptKey {

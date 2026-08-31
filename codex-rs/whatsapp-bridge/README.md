@@ -32,6 +32,21 @@ Provider message limits and edit scheduling are adapter/worker capabilities;
 legacy runtime chunk and edit fields are read for compatibility but are not
 used or written by current bridge state.
 
+Remote output policy is configured in the top-level `[bridge]` table, shared by
+all provider adapters rather than nested under `[whatsapp]`:
+
+```toml
+[bridge]
+include_reasoning = false
+include_tool_calls = false
+include_approval_notices = false
+```
+
+All three categories are allowlisted and default to off. Permission requests
+remain available regardless of `include_approval_notices`. With approval
+notices disabled, command and file-change approval requests are rejected rather
+than left waiting for an invisible reply.
+
 On first start, the bridge also creates the user-editable command catalogue at
 `CODEX_HOME/whatsapp/commands.json`. `/help` and `/` reload that file, so help
 grouping, footer text, approval guidance, and the outbound response prefix can
@@ -114,8 +129,10 @@ The bridge-specific behavior is limited to:
   endpoints.
 
 Normal Codex transcript items are projected and delivered as they stream. Commentary,
-plans, reasoning summaries, tool activity, and final answers retain their item order;
-provider segmentation is lossless and does not add bridge prefixes or chunk labels.
+plans, and final answers retain their item order by default. Reasoning summaries,
+tool activity, and command/file-change approval notices are delivered only when
+enabled in the shared `[bridge]` policy; provider segmentation is lossless and
+does not add bridge prefixes or chunk labels.
 
 The bridge does not implement or advertise the TUI-only approval retry flow or
 the general TUI slash-command set. `/approve`, `/approve-session`, and `/deny`

@@ -17,6 +17,7 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::UserInput;
 use codex_protocol::ThreadId;
 use codex_protocol::items::UserMessageItem;
+use codex_transcript::TranscriptProjectionOptions;
 use codex_transcript::TranscriptProjector;
 use ratatui::style::Stylize as _;
 use ratatui::text::Line;
@@ -58,7 +59,10 @@ pub(crate) fn thread_to_transcript_cells(
             .and_then(|thread_id| InlineVisualizationContext::new(codex_home, thread_id))
     });
     let mut cells: TranscriptCells = Vec::new();
-    let mut projector = TranscriptProjector::default();
+    let mut projector = TranscriptProjector::new(TranscriptProjectionOptions {
+        include_reasoning: true,
+        include_tool_calls: true,
+    });
     for turn in &thread.turns {
         projector.reconcile_items(&thread.id, &turn.id, &turn.items);
     }

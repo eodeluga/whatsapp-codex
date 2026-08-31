@@ -1,5 +1,6 @@
 //! Transcript and active-cell bookkeeping for `ChatWidget`.
 
+use codex_transcript::TranscriptProjectionOptions;
 use codex_transcript::TranscriptProjector;
 
 use super::HistoryCell;
@@ -38,6 +39,10 @@ pub(super) struct TranscriptState {
 impl TranscriptState {
     pub(super) fn new(active_cell: Option<Box<dyn HistoryCell>>) -> Self {
         Self {
+            projector: TranscriptProjector::new(TranscriptProjectionOptions {
+                include_reasoning: true,
+                include_tool_calls: true,
+            }),
             active_cell,
             ..Self::default()
         }
