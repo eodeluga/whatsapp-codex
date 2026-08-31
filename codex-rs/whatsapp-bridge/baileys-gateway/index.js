@@ -176,7 +176,7 @@ const server = http.createServer((request, response) => {
       }
       const body = JSON.parse(raw);
       if (request.method === "POST" && request.url === "/v1/messages" && status === "ready") { const sent = await socket.sendMessage(body.chatId, { text: body.text }); return reply(response, 201, { id: sent.key.id }); }
-      if (request.method === "POST" && request.url === "/v1/messages/edit" && status === "ready") { await socket.sendMessage(body.chatId, { edit: { fromMe: true, id: body.messageId, remoteJid: body.chatId }, text: body.text }); return reply(response, 204, {}); }
+      if (request.method === "POST" && request.url === "/v1/messages/edit" && status === "ready") { await socket.sendMessage(body.chatId, { text: body.text }, { edit: { fromMe: true, id: body.messageId, remoteJid: body.chatId } }); return reply(response, 204, {}); }
       return reply(response, 409, {});
     } catch (error) {
       console.log(JSON.stringify({ event: "http.request_failed", path: request.url, error: String(error) }));
