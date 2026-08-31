@@ -1,3 +1,4 @@
+pub mod bridge;
 mod cloud_config_bundle;
 mod cloud_config_layers;
 mod config_layer_source;
@@ -35,6 +36,9 @@ pub mod whatsapp;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 
+pub use bridge::BridgeConfigError;
+pub use bridge::BridgeConfigToml;
+pub use bridge::load_user_bridge_config;
 pub use cloud_config_bundle::CloudConfigBundle;
 pub use cloud_config_bundle::CloudConfigBundleLayers;
 pub use cloud_config_bundle::CloudConfigBundleLoadError;

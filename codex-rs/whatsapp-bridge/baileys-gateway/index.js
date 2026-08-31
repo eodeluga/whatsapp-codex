@@ -1,4 +1,4 @@
-import makeWASocket, { Browsers, DisconnectReason, downloadContentFromMessage, makeCacheableSignalKeyStore, toBuffer, useMultiFileAuthState } from "@whiskeysockets/baileys";
+import makeWASocket, { Browsers, DisconnectReason, downloadContentFromMessage, generateMessageIDV2, makeCacheableSignalKeyStore, toBuffer, useMultiFileAuthState } from "@whiskeysockets/baileys";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, rm, unlink } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
@@ -17,6 +17,16 @@ let connectionGeneration = 0;
 const runtime = async () => JSON.parse(await readFile("/codex-home/whatsapp/runtime.json", "utf8"));
 const attachmentDir = process.env.CODEX_WHATSAPP_ATTACHMENT_DIR ?? "/codex-home/whatsapp/attachments";
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+const MAX_RECENT_OUTBOUND_MESSAGE_IDS = 4096;
+const recentOutboundMessageIds = new Map();
+const rememberOutboundMessage = (messageId) => {
+  if (!messageId) return;
+  recentOutboundMessageIds.delete(messageId);
+  recentOutboundMessageIds.set(messageId, Date.now());
+  while (recentOutboundMessageIds.size > MAX_RECENT_OUTBOUND_MESSAGE_IDS) {
+    recentOutboundMessageIds.delete(recentOutboundMessageIds.keys().next().value);
+  }
+};
 const safeAttachmentExtension = (fileName) => {
   const extension = fileName?.match(/\.[A-Za-z0-9]{1,16}$/u)?.[0];
   return extension ? extension.toLowerCase() : "";
@@ -153,6 +163,10 @@ const connect = async () => {
     if (type === "notify") {
       for (const message of messages) {
         if (!message.key.id || !message.key.remoteJid || !message.message) continue;
+        if (recentOutboundMessageIds.has(message.key.id)) {
+          console.log(JSON.stringify({ event: "message.suppressed_outbound", id: message.key.id }));
+          continue;
+        }
         try {
           await deliver(message, nextSocket);
         } catch (error) {
@@ -175,8 +189,29 @@ const server = http.createServer((request, response) => {
         if (raw.length > 64 * 1024) return reply(response, 413, {});
       }
       const body = JSON.parse(raw);
-      if (request.method === "POST" && request.url === "/v1/messages" && status === "ready") { const sent = await socket.sendMessage(body.chatId, { text: body.text }); return reply(response, 201, { id: sent.key.id }); }
-      if (request.method === "POST" && request.url === "/v1/messages/edit" && status === "ready") { await socket.sendMessage(body.chatId, { edit: { fromMe: true, id: body.messageId, remoteJid: body.chatId }, text: body.text }); return reply(response, 204, {}); }
+      if (request.method === "POST" && request.url === "/v1/messages" && status === "ready") {
+        const messageId = generateMessageIDV2(socket.user?.id);
+        rememberOutboundMessage(messageId);
+        try {
+          const sent = await socket.sendMessage(body.chatId, { text: body.text }, { messageId });
+          return reply(response, 201, { id: sent.key.id });
+        } catch (error) {
+          recentOutboundMessageIds.delete(messageId);
+          throw error;
+        }
+      }
+      if (request.method === "POST" && request.url === "/v1/messages/edit" && status === "ready") {
+        const messageId = generateMessageIDV2(socket.user?.id);
+        rememberOutboundMessage(messageId);
+        rememberOutboundMessage(body.messageId);
+        try {
+          await socket.sendMessage(body.chatId, { edit: { fromMe: true, id: body.messageId, remoteJid: body.chatId }, text: body.text }, { messageId });
+          return reply(response, 204, {});
+        } catch (error) {
+          recentOutboundMessageIds.delete(messageId);
+          throw error;
+        }
+      }
       return reply(response, 409, {});
     } catch (error) {
       console.log(JSON.stringify({ event: "http.request_failed", path: request.url, error: String(error) }));

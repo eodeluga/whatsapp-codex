@@ -17,6 +17,8 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::UserInput;
 use codex_protocol::ThreadId;
 use codex_protocol::items::UserMessageItem;
+use codex_transcript::TranscriptProjectionOptions;
+use codex_transcript::TranscriptProjector;
 use ratatui::style::Stylize as _;
 use ratatui::text::Line;
 
@@ -57,7 +59,15 @@ pub(crate) fn thread_to_transcript_cells(
             .and_then(|thread_id| InlineVisualizationContext::new(codex_home, thread_id))
     });
     let mut cells: TranscriptCells = Vec::new();
-    for item in thread.turns.into_iter().flat_map(|turn| turn.items) {
+    let mut projector = TranscriptProjector::new(TranscriptProjectionOptions {
+        include_reasoning: true,
+        include_tool_calls: true,
+    });
+    for turn in &thread.turns {
+        projector.reconcile_items(&thread.id, &turn.id, &turn.items);
+    }
+    for entry in projector.entries() {
+        let item = &entry.item;
         match item {
             ThreadItem::UserMessage {
                 id,
@@ -76,9 +86,10 @@ pub(crate) fn thread_to_transcript_cells(
                     );
                 }
                 let item = UserMessageItem {
-                    id,
-                    client_id,
+                    id: id.clone(),
+                    client_id: client_id.clone(),
                     content: content
+                        .clone()
                         .into_iter()
                         .map(codex_app_server_protocol::UserInput::into_core)
                         .collect(),
@@ -91,7 +102,7 @@ pub(crate) fn thread_to_transcript_cells(
                 }));
             }
             ThreadItem::AgentMessage { text, .. } => {
-                let parsed = parse_assistant_markdown(&text, cwd.as_path());
+                let parsed = parse_assistant_markdown(text, cwd.as_path());
                 if !parsed.visible_markdown.trim().is_empty() {
                     cells.push(Arc::new(AgentMarkdownCell::new_with_inline_visualizations(
                         parsed.visible_markdown,
@@ -103,7 +114,7 @@ pub(crate) fn thread_to_transcript_cells(
             ThreadItem::Plan { text, .. } => {
                 if !text.trim().is_empty() {
                     cells.push(Arc::new(crate::history_cell::new_proposed_plan(
-                        text,
+                        text.clone(),
                         cwd.as_path(),
                     )));
                 }
@@ -117,7 +128,7 @@ pub(crate) fn thread_to_transcript_cells(
                     {
                         ("Reasoning".to_string(), content.join("\n\n"))
                     } else {
-                        split_reasoning_summary_parts(&summary)
+                        split_reasoning_summary_parts(summary)
                     };
                 if !text.trim().is_empty() {
                     cells.push(Arc::new(ReasoningSummaryCell::new(
@@ -129,7 +140,7 @@ pub(crate) fn thread_to_transcript_cells(
                 }
             }
             other => {
-                if let Some(cell) = fallback_transcript_cell(&other) {
+                if let Some(cell) = fallback_transcript_cell(other) {
                     cells.push(Arc::new(cell));
                 }
             }

@@ -1,6 +1,10 @@
 //! Signed, transport-neutral inbound event handling.
 
 use crate::attachment::InboundAttachment;
+use codex_messaging::InboundEnvelope;
+use codex_messaging::ProviderAttachment;
+use codex_messaging::ProviderConversationId;
+use codex_messaging::ProviderMessageId;
 use hmac::Hmac;
 use hmac::Mac;
 use serde::Deserialize;
@@ -38,6 +42,40 @@ pub struct InboundMessage {
     pub chat_id: String,
     pub body: String,
     pub attachment: Option<InboundAttachment>,
+}
+
+impl InboundMessage {
+    /// Converts an already verified self-chat message into the provider-neutral
+    /// envelope consumed by the messaging core.
+    pub fn as_envelope(&self) -> InboundEnvelope {
+        InboundEnvelope {
+            idempotency_key: self.idempotency_key.clone(),
+            provider_message_id: ProviderMessageId::new(self.message_id.clone()),
+            conversation_id: ProviderConversationId::new(self.chat_id.clone()),
+            // Self-chat filtering proves that the verified sender is the
+            // configured conversation identity for this adapter.
+            sender_id: self.chat_id.clone(),
+            body: self.body.clone(),
+            attachments: self
+                .attachment
+                .as_ref()
+                .map(|attachment| {
+                    ProviderAttachment::new(match attachment {
+                        InboundAttachment::Image { mime_type, .. } => {
+                            format!("image:{mime_type}")
+                        }
+                        InboundAttachment::Document { path, .. } => {
+                            format!("document:{}", path.display())
+                        }
+                        InboundAttachment::Unsupported { kind } => {
+                            format!("unsupported:{kind}")
+                        }
+                    })
+                })
+                .into_iter()
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

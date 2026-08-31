@@ -1,6 +1,7 @@
 //! Durable, bounded bridge state.
 
 use crate::attachment::InboundAttachment;
+use codex_app_server_protocol::RequestId;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -10,7 +11,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use thiserror::Error;
 
-pub const STATE_SCHEMA_VERSION: u32 = 4;
+pub const STATE_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -24,12 +25,14 @@ pub struct BridgeState {
     pub queued_prompts: Vec<QueuedPrompt>,
     #[serde(default)]
     pub pending_steers: Vec<PendingSteer>,
-    #[serde(default)]
-    pub outbox: Vec<OutboundMessage>,
+    #[serde(rename = "outbox", default, skip_serializing)]
+    pub legacy_outbox: Vec<OutboundMessage>,
     #[serde(default)]
     pub processed_events: BTreeMap<String, u64>,
     #[serde(default)]
     pub outbound_message_ids: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub pending_user_inputs: Vec<PendingUserInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,7 +49,8 @@ pub struct ActiveTurn {
     #[serde(default)]
     pub thread_id: String,
     pub codex_turn_id: String,
-    pub working_output_message_id: Option<String>,
+    #[serde(rename = "workingOutputMessageId", default, skip_serializing)]
+    pub legacy_working_output_message_id: Option<String>,
     #[serde(default)]
     pub attachment_paths: Vec<std::path::PathBuf>,
 }
@@ -90,6 +94,33 @@ pub struct OutboundMessage {
     pub attempts: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PendingUserInput {
+    pub token: String,
+    pub request_id: RequestId,
+    pub thread_id: String,
+    pub turn_id: String,
+    pub questions: Vec<PendingUserInputQuestion>,
+    pub answers: BTreeMap<String, Vec<String>>,
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PendingUserInputQuestion {
+    pub id: String,
+    pub question: String,
+    pub options: Option<Vec<PendingUserInputOption>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PendingUserInputOption {
+    pub label: String,
+    pub description: String,
+}
+
 #[derive(Debug, Error)]
 pub enum StateError {
     #[error("unsupported bridge state schema")]
@@ -123,6 +154,10 @@ impl BridgeState {
                         Ok(state)
                     }
                     2 => {
+                        state.schema_version = STATE_SCHEMA_VERSION;
+                        Ok(state)
+                    }
+                    4 => {
                         state.schema_version = STATE_SCHEMA_VERSION;
                         Ok(state)
                     }

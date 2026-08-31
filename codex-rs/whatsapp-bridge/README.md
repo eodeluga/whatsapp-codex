@@ -25,8 +25,32 @@ needs the host workspace mounted.
 
 The bridge reads the user-owned `[whatsapp]` table from Codex's normal
 `config.toml` and private generated state from
-`CODEX_HOME/whatsapp/runtime.json`. Users must not create Baileys transport credentials,
+`CODEX_HOME/whatsapp/runtime.json`; durable transcript delivery is kept in a sibling
+private journal. Users must not create Baileys transport credentials,
 session IDs, API keys, webhook URLs, or signing secrets manually.
+Provider message limits and edit scheduling are adapter/worker capabilities;
+legacy runtime chunk and edit fields are read for compatibility but are not
+used or written by current bridge state.
+
+Remote output policy is configured in the top-level `[bridge]` table, shared by
+all provider adapters rather than nested under `[whatsapp]`:
+
+```toml
+[bridge]
+include_reasoning = false
+include_tool_calls = false
+include_approval_notices = false
+```
+
+All three categories are allowlisted and default to off. Permission requests
+remain available regardless of `include_approval_notices`. With approval
+notices disabled, command and file-change approval requests are rejected rather
+than left waiting for an invisible reply.
+
+For every active turn, the bridge may also emit these provider-neutral short
+statuses, at most once each: `[codex working...]`, `[codex reasoning...]`, and
+`[codex tooling]`. Repeated reasoning steps, tool events, reconnects, and
+transcript revisions do not duplicate them.
 
 On first start, the bridge also creates the user-editable command catalogue at
 `CODEX_HOME/whatsapp/commands.json`. `/help` and `/` reload that file, so help
@@ -105,9 +129,15 @@ The bridge-specific behavior is limited to:
 - `/whatsapp list-threads` and `/whatsapp attach <thread-id>`;
 - `/status` for bridge, app-server, and transport health;
 - `/stop`, `/help`, and the user-editable WhatsApp help catalogue;
-- `/answer <token> <answer>` for the existing requested-user-input limitation;
-- `[codex]` response labelling, output chunking/editing, webhook deduplication,
-  durable delivery, reconnect handling, and health/pairing endpoints.
+- `/answer <token> <answer>` for sequential `request_user_input` questions;
+- webhook deduplication, durable delivery, reconnect handling, and health/pairing
+  endpoints.
+
+Normal Codex transcript items are projected and delivered as they stream. Commentary,
+plans, and final answers retain their item order by default. Reasoning summaries,
+tool activity, and command/file-change approval notices are delivered only when
+enabled in the shared `[bridge]` policy; provider segmentation is lossless and
+does not add bridge prefixes or chunk labels.
 
 The bridge does not implement or advertise the TUI-only approval retry flow or
 the general TUI slash-command set. `/approve`, `/approve-session`, and `/deny`
@@ -128,7 +158,7 @@ Transport-specific thread selection uses:
 - `/whatsapp attach <thread-id>`.
 
 Inbound webhook delivery is durably deduplicated. Bridge-authored messages are
-excluded from inbound processing, queued output is bounded, and app-server
+excluded from inbound processing, projected delivery is bounded, and app-server
 reconnect attempts emit at most one outage notification for an affected
 prompt.
 
@@ -138,6 +168,7 @@ Run from `codex-rs`:
 
 ```shell
 just fmt
+just test -p codex-transcript
 just test -p codex-whatsapp-bridge
 ```
 

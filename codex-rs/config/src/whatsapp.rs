@@ -38,7 +38,11 @@ pub struct WhatsAppRuntimeConfig {
     pub bridge_listen: String,
     pub state_path: PathBuf,
     pub max_queued_prompts: usize,
+    /// Legacy compatibility field. Delivery uses provider capabilities.
+    #[serde(default, skip_serializing)]
     pub output_chunk_chars: usize,
+    /// Legacy compatibility field. Edit scheduling belongs to the delivery worker.
+    #[serde(default, skip_serializing)]
     pub edit_interval_ms: u64,
     pub dedupe_capacity: usize,
     pub dedupe_ttl_hours: u64,

@@ -3587,6 +3587,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-messaging"
+version = "0.0.0"
+dependencies = [
+ "codex-transcript",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "codex-model-provider"
 version = "0.0.0"
 dependencies = [
@@ -4163,6 +4176,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-transcript"
+version = "0.0.0"
+dependencies = [
+ "codex-app-server-protocol",
+ "codex-protocol",
+ "pretty_assertions",
+ "serde",
+ "tracing",
+]
+
+[[package]]
 name = "codex-tui"
 version = "0.0.0"
 dependencies = [
@@ -4204,6 +4228,7 @@ dependencies = [
  "codex-shell-command",
  "codex-state",
  "codex-terminal-detection",
+ "codex-transcript",
  "codex-utils-absolute-path",
  "codex-utils-approval-presentation",
  "codex-utils-approval-presets",
@@ -4577,7 +4602,9 @@ dependencies = [
  "codex-app-server-client",
  "codex-app-server-protocol",
  "codex-config",
+ "codex-messaging",
  "codex-protocol",
+ "codex-transcript",
  "codex-utils-absolute-path",
  "codex-utils-approval-presentation",
  "hmac 0.12.1",

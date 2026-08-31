@@ -36,8 +36,9 @@ pub(crate) async fn read_config_lock_from_path(
 }
 
 pub(crate) fn config_lockfile(mut config: ConfigToml) -> ConfigLockfileToml {
-    // WhatsApp credentials are operational bridge configuration, not replayable
-    // Codex session configuration. Never export them in a lockfile.
+    // Remote bridge configuration is operational transport policy, not
+    // replayable Codex session configuration. Never export it in a lockfile.
+    config.bridge = None;
     config.whatsapp = None;
     ConfigLockfileToml {
         version: CONFIG_LOCK_VERSION,

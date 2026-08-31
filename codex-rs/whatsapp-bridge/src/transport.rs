@@ -1,12 +1,18 @@
 //! Transport-neutral client for a private remote-input plugin.
 
+use codex_messaging::ProviderAdapter;
+use codex_messaging::ProviderCapabilities;
+use codex_messaging::ProviderConversationId;
+use codex_messaging::ProviderError;
+use codex_messaging::ProviderMessageId;
+use codex_messaging::ProviderStatus;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde::Serialize;
 use std::time::Duration;
 use thiserror::Error;
 
-const MAX_TEXT_CHARS: usize = 4096;
+pub const MAX_TEXT_CHARS: usize = 4096;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TransportError {
@@ -150,6 +156,64 @@ impl TransportClient for HttpTransportClient {
     }
 }
 
+impl ProviderAdapter for HttpTransportClient {
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            message_limit: MAX_TEXT_CHARS,
+            edit_support: true,
+            attachment_support: true,
+            supports_markdown: false,
+            rich_interaction_support: false,
+        }
+    }
+
+    async fn status(&self) -> Result<ProviderStatus, ProviderError> {
+        TransportClient::status(self)
+            .await
+            .map(|status| ProviderStatus {
+                ready: status.status.eq_ignore_ascii_case("ready"),
+                account: status.account,
+            })
+            .map_err(provider_error)
+    }
+
+    async fn send_text(
+        &self,
+        conversation_id: ProviderConversationId,
+        text: String,
+    ) -> Result<ProviderMessageId, ProviderError> {
+        TransportClient::send_text(self, conversation_id.as_str().to_string(), text)
+            .await
+            .map(ProviderMessageId::new)
+            .map_err(provider_error)
+    }
+
+    async fn edit_text(
+        &self,
+        conversation_id: ProviderConversationId,
+        message_id: ProviderMessageId,
+        text: String,
+    ) -> Result<(), ProviderError> {
+        TransportClient::edit_text(
+            self,
+            conversation_id.as_str().to_string(),
+            message_id.as_str().to_string(),
+            text,
+        )
+        .await
+        .map_err(provider_error)
+    }
+}
+
+fn provider_error(error: TransportError) -> ProviderError {
+    match error {
+        TransportError::Transport | TransportError::TextTooLong => ProviderError::Transport,
+        TransportError::Unauthorized => ProviderError::Unauthorized,
+        TransportError::Unavailable => ProviderError::Unavailable,
+        TransportError::InvalidResponse => ProviderError::InvalidResponse,
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SendTextRequest {
@@ -181,3 +245,7 @@ fn ensure_success(status: StatusCode) -> Result<(), TransportError> {
         _ => Err(TransportError::InvalidResponse),
     }
 }
+
+#[cfg(test)]
+#[path = "transport_tests.rs"]
+mod tests;

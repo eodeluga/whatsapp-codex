@@ -1,9 +1,14 @@
 //! Transcript and active-cell bookkeeping for `ChatWidget`.
 
+use codex_transcript::TranscriptProjectionOptions;
+use codex_transcript::TranscriptProjector;
+
 use super::HistoryCell;
 
 #[derive(Default)]
 pub(super) struct TranscriptState {
+    /// Shared item-keyed semantic projection used by both the TUI and remote providers.
+    pub(super) projector: TranscriptProjector,
     pub(super) active_cell: Option<Box<dyn HistoryCell>>,
     /// Monotonic-ish counter used to invalidate transcript overlay caching.
     pub(super) active_cell_revision: u64,
@@ -34,6 +39,10 @@ pub(super) struct TranscriptState {
 impl TranscriptState {
     pub(super) fn new(active_cell: Option<Box<dyn HistoryCell>>) -> Self {
         Self {
+            projector: TranscriptProjector::new(TranscriptProjectionOptions {
+                include_reasoning: true,
+                include_tool_calls: true,
+            }),
             active_cell,
             ..Self::default()
         }
