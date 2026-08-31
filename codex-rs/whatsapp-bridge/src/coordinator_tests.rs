@@ -596,6 +596,12 @@ async fn turn_statuses_are_each_delivered_once() {
     delivery.shutdown().await;
     delivery_task.await.unwrap();
 
+    coordinator.handle_delivery_event(DeliveryWorkerEvent::Sent {
+        key: TranscriptKey::new("thread-1", "turn-1", "item-1"),
+        segment: 0,
+        provider_message_id: ProviderMessageId::new("bridge-output"),
+    });
+
     assert_eq!(
         *sent.lock().unwrap(),
         vec![
@@ -604,6 +610,7 @@ async fn turn_statuses_are_each_delivered_once() {
             "[codex tooling]".to_string(),
         ]
     );
+    assert!(coordinator.state.was_sent_by_bridge("bridge-output"));
 }
 
 #[derive(Clone, Default)]

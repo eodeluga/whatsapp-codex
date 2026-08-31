@@ -287,6 +287,22 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
         .await
         {
             Ok(worker) => {
+                let now = unix_timestamp();
+                let recovered_outbound_ids = worker
+                    .sent_provider_message_ids()
+                    .map(|message_id| message_id.as_str().to_string())
+                    .collect::<Vec<_>>();
+                if !recovered_outbound_ids.is_empty() {
+                    for message_id in recovered_outbound_ids {
+                        self.state.mark_outbound(message_id, now);
+                    }
+                    self.state
+                        .prune(now, self.dedupe_ttl_hours, self.dedupe_capacity);
+                    if self.state.save(&self.state_path).is_err() {
+                        self.state_healthy = false;
+                        self.refresh_readiness();
+                    }
+                }
                 self.delivery = Some(delivery.clone());
                 Some(tokio::spawn(worker.run(delivery_commands)))
             }
@@ -489,7 +505,20 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             DeliveryWorkerEvent::Enqueued { key, queue_depth } => {
                 tracing::debug!(key = ?key, queue_depth, "transcript delivery queued");
             }
-            DeliveryWorkerEvent::Sent { key, segment } => {
+            DeliveryWorkerEvent::Sent {
+                key,
+                segment,
+                provider_message_id,
+            } => {
+                let now = unix_timestamp();
+                self.state
+                    .mark_outbound(provider_message_id.as_str().to_string(), now);
+                self.state
+                    .prune(now, self.dedupe_ttl_hours, self.dedupe_capacity);
+                if self.state.save(&self.state_path).is_err() {
+                    self.state_healthy = false;
+                    self.refresh_readiness();
+                }
                 tracing::debug!(key = ?key, segment, "transcript delivery sent");
             }
             DeliveryWorkerEvent::Edited {

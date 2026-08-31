@@ -110,6 +110,14 @@ async fn set_private_permissions(path: &std::path::Path) -> std::io::Result<()> 
 }
 
 impl DeliveryJournal {
+    /// Returns provider message IDs for output durably known to be sent.
+    pub fn sent_provider_message_ids(&self) -> impl Iterator<Item = &ProviderMessageId> {
+        self.records
+            .iter()
+            .filter(|record| record.state == DeliveryState::Sent)
+            .filter_map(|record| record.provider_message_id.as_ref())
+    }
+
     pub fn apply(&mut self, intent: DeliveryIntent, message_limit: usize) -> usize {
         let segments = segment_text(&intent.text, message_limit);
         let segment_count = segments.len();
@@ -221,6 +229,7 @@ pub enum DeliveryWorkerEvent {
     Sent {
         key: TranscriptKey,
         segment: usize,
+        provider_message_id: ProviderMessageId,
     },
     Edited {
         key: TranscriptKey,
@@ -301,6 +310,11 @@ where
     ) -> (DeliveryWorkerHandle, mpsc::Receiver<DeliveryWorkerCommand>) {
         let (sender, receiver) = mpsc::channel(capacity);
         (DeliveryWorkerHandle { sender }, receiver)
+    }
+
+    /// Returns provider message IDs restored from the durable delivery journal.
+    pub fn sent_provider_message_ids(&self) -> impl Iterator<Item = &ProviderMessageId> {
+        self.journal.sent_provider_message_ids()
     }
 
     pub async fn run(mut self, mut commands: mpsc::Receiver<DeliveryWorkerCommand>) {
@@ -439,6 +453,7 @@ where
                         let event = DeliveryWorkerEvent::Sent {
                             key: record.key.clone(),
                             segment: record.segment,
+                            provider_message_id: message_id.clone(),
                         };
                         self.journal.records[index].provider_message_id = Some(message_id);
                         self.journal.records[index].state = DeliveryState::Sent;

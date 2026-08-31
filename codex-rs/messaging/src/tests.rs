@@ -146,9 +146,30 @@ async fn worker_sends_segments_before_commit_and_persists_provider_ids() {
         })
         .await
         .unwrap();
-    let _ = event_rx.recv().await;
-    let _ = event_rx.recv().await;
-    let _ = event_rx.recv().await;
+    let received_events = vec![
+        event_rx.recv().await.unwrap(),
+        event_rx.recv().await.unwrap(),
+        event_rx.recv().await.unwrap(),
+    ];
+    assert_eq!(
+        received_events,
+        vec![
+            DeliveryWorkerEvent::Enqueued {
+                key: TranscriptKey::new("thread", "turn", "item"),
+                queue_depth: 2,
+            },
+            DeliveryWorkerEvent::Sent {
+                key: TranscriptKey::new("thread", "turn", "item"),
+                segment: 0,
+                provider_message_id: ProviderMessageId::new("message-1"),
+            },
+            DeliveryWorkerEvent::Sent {
+                key: TranscriptKey::new("thread", "turn", "item"),
+                segment: 1,
+                provider_message_id: ProviderMessageId::new("message-2"),
+            },
+        ]
+    );
     assert_eq!(*sent.lock().unwrap(), vec!["abc", "def"]);
     handle.shutdown().await;
     task.await.unwrap();
