@@ -476,7 +476,7 @@ impl ThreadHistoryBuilder {
                     | RolloutItem::TurnContext(_)
                     | RolloutItem::WorldState(_)
                     | RolloutItem::SessionMeta(_)
-                    | RolloutItem::ResponseItem(_) => unreachable!("response handled above"),
+                    | RolloutItem::ResponseItem(_) => {}
                 }
             }
         }
@@ -4485,6 +4485,16 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn ignores_rollout_metadata_during_history_reconstruction() {
+        let turns =
+            build_turns_from_rollout_items(&[RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn: false,
+            }]);
+
+        assert_eq!(turns, Vec::new());
     }
 
     #[test]
