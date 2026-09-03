@@ -43,6 +43,9 @@ pub struct TranscriptProjectionOptions {
     /// Include tool calls and tool activity in the projection.
     /// The default is false because tool execution is not normally provider output.
     pub include_tool_calls: bool,
+    /// Include automatic approval review messages in the projection.
+    /// The default is false because review diagnostics are not normally provider output.
+    pub include_automatic_approval_reviews: bool,
 }
 
 /// Item-keyed, append-ordered projection of a Codex thread.
@@ -150,9 +153,12 @@ impl TranscriptProjector {
             }
             ServerNotification::Error(notification) => self.apply_error(notification),
             ServerNotification::Warning(notification) => self.apply_warning(notification),
-            ServerNotification::GuardianWarning(notification) => {
+            ServerNotification::GuardianWarning(notification)
+                if self.options.include_automatic_approval_reviews =>
+            {
                 self.apply_guardian_warning(notification)
             }
+            ServerNotification::GuardianWarning(_) => vec![ProjectionEvent::Suppressed],
             ServerNotification::ConfigWarning(notification) => {
                 self.apply_config_warning(notification)
             }

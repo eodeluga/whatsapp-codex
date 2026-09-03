@@ -361,6 +361,11 @@
           "description": "Include command and file-change approval notices in remote output. Permission requests are not controlled by this setting.",
           "type": "boolean"
         },
+        "include_automatic_approval_reviews": {
+          "default": false,
+          "description": "Include automatic approval review messages in remote output.",
+          "type": "boolean"
+        },
         "include_reasoning": {
           "default": false,
           "description": "Include reasoning summaries and raw reasoning content in remote output.",

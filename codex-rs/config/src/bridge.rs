@@ -22,6 +22,9 @@ pub struct BridgeConfigToml {
     /// Permission requests are not controlled by this setting.
     #[serde(default)]
     pub include_approval_notices: bool,
+    /// Include automatic approval review messages in remote output.
+    #[serde(default)]
+    pub include_automatic_approval_reviews: bool,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
