@@ -7,6 +7,7 @@ import { join } from "node:path";
 import P from "pino";
 import QRCode from "qrcode";
 import { pipeline } from "node:stream/promises";
+import { DeliveryStore, createDeliveryHandler } from "./delivery-store.js";
 
 let account;
 let qrCode;
@@ -19,6 +20,8 @@ const attachmentDir = process.env.CODEX_WHATSAPP_ATTACHMENT_DIR ?? "/codex-home/
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
 const MAX_RECENT_OUTBOUND_MESSAGE_IDS = 4096;
 const recentOutboundMessageIds = new Map();
+const deliveryStore = new DeliveryStore(process.env.CODEX_WHATSAPP_DELIVERY_STORE ?? "/data/delivery/idempotency.json");
+const logDeliveryDiagnostics = (event) => console.log(JSON.stringify({ event, delivery: deliveryStore.diagnostics() }));
 const rememberOutboundMessage = (messageId) => {
   if (!messageId) return;
   recentOutboundMessageIds.delete(messageId);
@@ -103,7 +106,7 @@ const deliver = async (message, client) => {
   const ownJids = [client.user?.id, client.user?.lid].filter(Boolean);
   const jidAddress = (jid) => jid?.split("@")[0]?.split(":")[0];
   const isSelfChat = fromMe && !isGroup && ownJids.some((jid) => jid === chatId || jidAddress(jid) === jidAddress(chatId));
-  console.log(JSON.stringify({ event: "message.received", id: message.key.id, chatId, fromMe, isGroup, isSelfChat, hasText: body.length > 0 }));
+  console.log(JSON.stringify({ event: "message.received", id: message.key.id, fromMe, isGroup, isSelfChat, hasText: body.length > 0 }));
   const payload = JSON.stringify({ event: "message", idempotencyKey: message.key.id, data: { body, chatId, fromMe, id: message.key.id, isGroup, isSelfChat, attachment: attachment ?? null } });
   const signature = createHmac("sha256", config.webhookSigningSecret).update(payload).digest("hex");
   const response = await fetch(config.webhookUrl, { body: payload, headers: { "content-type": "application/json", "x-codex-transport-signature": `sha256=${signature}` }, method: "POST", signal: AbortSignal.timeout(10000) });
@@ -170,18 +173,33 @@ const connect = async () => {
         try {
           await deliver(message, nextSocket);
         } catch (error) {
-          console.log(JSON.stringify({ event: "message.delivery_failed", id: message.key.id, error: String(error) }));
+          console.log(JSON.stringify({ event: "message.delivery_failed", id: message.key.id, error: "webhook delivery failed" }));
         }
       }
     }
   });
 };
+await deliveryStore.load();
+logDeliveryDiagnostics("delivery.store_loaded");
+const deliveryHandler = createDeliveryHandler({
+  forgetOutboundMessage: (messageId) => recentOutboundMessageIds.delete(messageId),
+  generateMessageId: () => generateMessageIDV2(socket?.user?.id),
+  rememberOutboundMessage,
+  sendMessage: ({ chatId, messageId, text }) => socket.sendMessage(chatId, { text }, { messageId }),
+  store: deliveryStore,
+});
 const server = http.createServer((request, response) => {
   void (async () => {
     try {
       const config = await runtime();
       if (!isAuthorised(request, config)) return reply(response, 401, {});
-      if (request.method === "GET" && request.url === "/v1/status") return reply(response, 200, { account, status });
+      if (request.method === "GET" && request.url === "/v1/status") {
+        return reply(response, 200, {
+          account,
+          delivery: deliveryStore.diagnostics(),
+          status: deliveryStore.diagnostics().degraded ? "degraded" : status,
+        });
+      }
       if (request.method === "GET" && request.url === "/v1/pairing") return reply(response, 200, { qrCode });
       let raw = "";
       for await (const chunk of request) {
@@ -189,16 +207,16 @@ const server = http.createServer((request, response) => {
         if (raw.length > 64 * 1024) return reply(response, 413, {});
       }
       const body = JSON.parse(raw);
-      if (request.method === "POST" && request.url === "/v1/messages" && status === "ready") {
-        const messageId = generateMessageIDV2(socket.user?.id);
-        rememberOutboundMessage(messageId);
-        try {
-          const sent = await socket.sendMessage(body.chatId, { text: body.text }, { messageId });
-          return reply(response, 201, { id: sent.key.id });
-        } catch (error) {
-          recentOutboundMessageIds.delete(messageId);
-          throw error;
-        }
+      if (request.method === "POST" && request.url === "/v1/messages/ack") {
+        await deliveryHandler.acknowledge(body);
+        logDeliveryDiagnostics("delivery.acknowledged");
+        response.writeHead(204);
+        return response.end();
+      }
+      if (request.method === "POST" && request.url === "/v1/messages" && status === "ready" && !deliveryStore.diagnostics().degraded) {
+        const result = await deliveryHandler.send(body);
+        logDeliveryDiagnostics(result.statusCode === 200 ? "delivery.replayed" : "delivery.sent");
+        return reply(response, result.statusCode, result.body);
       }
       if (request.method === "POST" && request.url === "/v1/messages/edit" && status === "ready") {
         const messageId = generateMessageIDV2(socket.user?.id);
@@ -214,8 +232,12 @@ const server = http.createServer((request, response) => {
       }
       return reply(response, 409, {});
     } catch (error) {
-      console.log(JSON.stringify({ event: "http.request_failed", path: request.url, error: String(error) }));
-      if (!response.headersSent) return reply(response, 500, {});
+      const statusCode = Number.isInteger(error?.statusCode)
+        ? error.statusCode
+        : error instanceof SyntaxError
+          ? 400
+          : 500;
+      if (!response.headersSent) return reply(response, statusCode, {});
       response.end();
     }
   })();

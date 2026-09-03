@@ -101,9 +101,8 @@ Plain text during an active steerable turn uses `turn/steer`. Transcript items
 are mirrored through the shared semantic projector as they stream. Commentary,
 plans, and final answers are delivered by default; reasoning summaries,
 tool-call activity, approval notices, and automatic review outcomes require the
-shared `[bridge]` options. WhatsApp only
-segments content at its provider limit and does not add normal-output prefixes
-or chunk labels. Approval choices
+shared `[bridge]` options. WhatsApp only segments content at its provider limit
+and does not add normal-output prefixes or chunk labels. Approval choices
 have no user-visible IDs and are exactly the choices supplied by Codex. An
 automatic review may accept an action without showing a WhatsApp prompt;
 `Decline` lets the turn continue, while `Cancel` interrupts it. Reply with the
@@ -153,10 +152,21 @@ category: `[codex working...]`, `[codex reasoning...]`, and `[codex tooling]`.
 Repeated reasoning steps, tool events, reconnects, and transcript revisions do
 not repeat these statuses.
 
-The bridge keeps projected outbound transcript state in a private durable
-delivery journal beside its runtime state. It is used to resume pending sends
-after a bridge restart; normal transcript content is not stored in the user
-editable command catalogue.
+Canonical app-server item IDs are retained through live streaming and active-turn
+reconciliation, so a revised item is edited rather than delivered as a second
+WhatsApp message. The bridge keeps projected outbound state in a private durable
+delivery journal beside its runtime state. Each pending segment receives a
+provider-neutral delivery operation ID before its first send; retries reuse that
+ID, and an acknowledgement failure never resends an already journaled message.
+
+The gateway keeps its own hashed idempotency mappings in the named
+`baileys-delivery` volume at `/data/delivery/idempotency.json`. It retains
+unacknowledged evidence across restarts and exposes only state counts in its
+status diagnostics. The remaining narrow assumption is provider-level: if the
+gateway itself crashes after WhatsApp accepts a message but before it records
+`sent`, retrying the same Baileys message ID is expected to be deduplicated by
+WhatsApp/Baileys. This is at-least-once delivery with a minimized ambiguity
+window, not a strict exactly-once guarantee.
 
 The gateway creates a user-editable command and display catalogue at
 `~/.codex/whatsapp/commands.json` the first time it starts. This file contains
@@ -192,7 +202,8 @@ docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml logs -f \
   codex-whatsapp-bridge baileys-gateway
 ```
 
-Restarting the containers preserves Baileys transport and bridge state:
+Restarting the containers preserves Baileys transport, gateway delivery evidence,
+and bridge state:
 
 ```shell
 docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml restart
@@ -201,15 +212,15 @@ docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml restart
 The bridge automatically reconnects to the persisted Baileys transport. You normally do
 not need to pair again. If the pairing page presents a new QR code, Baileys transport no
 longer has an authenticated session and must be linked again. Do not delete the
-`baileys-auth` volume during routine restart or upgrade work.
+`baileys-auth` or `baileys-delivery` volumes during routine restart or upgrade work.
 
-After changing only bridge source, rebuild and recreate only that service:
+After changing bridge or gateway source, rebuild and recreate the deployment:
 
 ```shell
 docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml \
-  build codex-whatsapp-bridge
+  build baileys-gateway codex-whatsapp-bridge
 docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml \
-  up -d --no-deps --force-recreate codex-whatsapp-bridge
+  up -d --force-recreate
 ```
 
 ## Troubleshooting

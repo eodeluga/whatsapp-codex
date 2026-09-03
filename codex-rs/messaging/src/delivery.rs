@@ -1,5 +1,6 @@
 use crate::DeliveryIntent;
 use crate::ProviderAdapter;
+use crate::ProviderDeliveryId;
 use crate::ProviderError;
 use crate::ProviderMessageId;
 use crate::ProviderStatus;
@@ -8,6 +9,7 @@ use codex_transcript::EntryOrigin;
 use codex_transcript::TranscriptKey;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -21,6 +23,8 @@ use tokio::sync::mpsc;
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryRecord {
     pub conversation_id: crate::ProviderConversationId,
+    #[serde(default)]
+    pub delivery_id: Option<ProviderDeliveryId>,
     #[serde(default)]
     pub generation: u64,
     pub key: TranscriptKey,
@@ -44,6 +48,7 @@ pub enum DeliveryState {
     Pending,
     Sent,
     Superseded,
+    FailedPermanent,
 }
 
 /// A bounded, serializable delivery journal.
@@ -154,6 +159,7 @@ impl DeliveryJournal {
                 None => {
                     self.records.push(DeliveryRecord {
                         conversation_id: intent.conversation_id.clone(),
+                        delivery_id: Some(ProviderDeliveryId::generate()),
                         generation: intent.generation,
                         key: intent.key.clone(),
                         origin: intent.origin,
@@ -282,6 +288,8 @@ pub struct DeliveryWorker<A, S> {
     journal: DeliveryJournal,
     events: mpsc::Sender<DeliveryWorkerEvent>,
     retry_delay: Duration,
+    acknowledged_delivery_ids: HashSet<ProviderDeliveryId>,
+    delivery_degraded: bool,
 }
 
 impl<A, S> DeliveryWorker<A, S>
@@ -302,6 +310,8 @@ where
             journal,
             events,
             retry_delay,
+            acknowledged_delivery_ids: HashSet::new(),
+            delivery_degraded: false,
         })
     }
 
@@ -318,6 +328,8 @@ where
     }
 
     pub async fn run(mut self, mut commands: mpsc::Receiver<DeliveryWorkerCommand>) {
+        self.acknowledge_sent().await;
+        self.deliver_pending().await;
         let retry_delay = self.retry_delay.max(Duration::from_millis(1));
         let mut retry = tokio::time::interval(retry_delay);
         let status_interval = Duration::from_secs(5);
@@ -358,12 +370,18 @@ where
                         DeliveryWorkerCommand::Shutdown => break,
                     }
                 }
-                _ = retry.tick() => self.deliver_pending().await,
+                _ = retry.tick() => {
+                    self.acknowledge_sent().await;
+                    self.deliver_pending().await;
+                },
                 _ = status_check.tick() => {
-                    let status = self.adapter.status().await.unwrap_or(ProviderStatus {
+                    let mut status = self.adapter.status().await.unwrap_or(ProviderStatus {
                         ready: false,
                         account: None,
                     });
+                    if self.delivery_degraded {
+                        status.ready = false;
+                    }
                     let _ = self.events.try_send(DeliveryWorkerEvent::Status(status));
                 }
             }
@@ -377,6 +395,13 @@ where
     async fn deliver_pending(&mut self) {
         let capabilities = self.adapter.capabilities();
         while let Some(index) = self.journal.next_pending_index(unix_millis()) {
+            if self.journal.records[index].delivery_id.is_none() {
+                self.journal.records[index].delivery_id = Some(ProviderDeliveryId::generate());
+                if self.persist().await.is_err() {
+                    let _ = self.events.try_send(DeliveryWorkerEvent::StoreFailed);
+                    break;
+                }
+            }
             let record = self.journal.records[index].clone();
             if capabilities.edit_support
                 && let Some(message_id) = record.provider_message_id.clone()
@@ -431,6 +456,9 @@ where
                 }
             } else {
                 let started = Instant::now();
+                let Some(delivery_id) = record.delivery_id.clone() else {
+                    break;
+                };
                 tracing::debug!(
                     key = ?record.key,
                     segment = record.segment,
@@ -440,7 +468,11 @@ where
                 );
                 match self
                     .adapter
-                    .send_text(record.conversation_id.clone(), record.text.clone())
+                    .send_text(
+                        delivery_id,
+                        record.conversation_id.clone(),
+                        record.text.clone(),
+                    )
                     .await
                 {
                     Ok(message_id) => {
@@ -463,6 +495,8 @@ where
                             break;
                         }
                         let _ = self.events.try_send(event);
+                        self.acknowledge_record(&self.journal.records[index].clone())
+                            .await;
                     }
                     Err(error) => {
                         self.failed(index, record, error).await;
@@ -474,6 +508,24 @@ where
     }
 
     async fn failed(&mut self, index: usize, record: DeliveryRecord, error: ProviderError) {
+        if error == ProviderError::IdempotencyConflict {
+            self.journal.records[index].state = DeliveryState::FailedPermanent;
+            self.journal.records[index].next_attempt_at_ms = None;
+            let _ = self.persist().await;
+            self.delivery_degraded = true;
+            let _ = self.events.try_send(DeliveryWorkerEvent::Failed {
+                key: record.key,
+                segment: record.segment,
+                error,
+            });
+            let _ = self
+                .events
+                .try_send(DeliveryWorkerEvent::Status(ProviderStatus {
+                    ready: false,
+                    account: None,
+                }));
+            return;
+        }
         self.journal.records[index].attempts =
             self.journal.records[index].attempts.saturating_add(1);
         let exponent = self.journal.records[index]
@@ -492,6 +544,48 @@ where
             segment: record.segment,
             error,
         });
+    }
+
+    async fn acknowledge_sent(&mut self) {
+        let records = self
+            .journal
+            .records
+            .iter()
+            .filter(|record| record.state == DeliveryState::Sent)
+            .cloned()
+            .collect::<Vec<_>>();
+        for record in records {
+            self.acknowledge_record(&record).await;
+        }
+    }
+
+    async fn acknowledge_record(&mut self, record: &DeliveryRecord) {
+        let (Some(delivery_id), Some(message_id)) = (
+            record.delivery_id.clone(),
+            record.provider_message_id.clone(),
+        ) else {
+            return;
+        };
+        if self.acknowledged_delivery_ids.contains(&delivery_id) {
+            return;
+        }
+        match self
+            .adapter
+            .acknowledge_delivery(delivery_id.clone(), message_id)
+            .await
+        {
+            Ok(()) => {
+                self.acknowledged_delivery_ids.insert(delivery_id);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    key = ?record.key,
+                    segment = record.segment,
+                    %error,
+                    "provider delivery acknowledgement failed"
+                );
+            }
+        }
     }
 }
 

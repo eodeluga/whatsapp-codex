@@ -236,6 +236,7 @@ impl ThreadHistoryChangeAccumulator {
 pub struct ThreadHistoryBuilder {
     turns: Vec<Turn>,
     current_turn: Option<PendingTurn>,
+    pending_legacy_agent_message: Option<PendingLegacyAgentMessage>,
     next_item_index: i64,
     current_rollout_index: usize,
     next_rollout_index: usize,
@@ -253,6 +254,7 @@ impl ThreadHistoryBuilder {
         Self {
             turns: Vec::new(),
             current_turn: None,
+            pending_legacy_agent_message: None,
             next_item_index: 1,
             current_rollout_index: 0,
             next_rollout_index: 0,
@@ -265,6 +267,7 @@ impl ThreadHistoryBuilder {
     }
 
     pub fn finish(mut self) -> Vec<Turn> {
+        self.flush_pending_legacy_agent_message();
         self.finish_current_turn();
         self.turns
     }
@@ -323,19 +326,58 @@ impl ThreadHistoryBuilder {
             .map(|turn| turn.rollout_start_index)
     }
 
-    /// Shared reducer for persisted rollout replay and in-memory current-turn
-    /// tracking used by running thread resume/rejoin.
-    ///
-    /// This function should handle all EventMsg variants that can be persisted in a rollout file.
-    /// See `should_persist_event_msg` in `codex-rs/core/rollout/policy.rs`.
-    pub fn handle_event(&mut self, event: &EventMsg) {
+    /// Reduces live events into the active turn using canonical item lifecycle events.
+    pub fn handle_live_event(&mut self, event: &EventMsg) {
+        match event {
+            // These are legacy translations emitted immediately after canonical lifecycle
+            // events. They are retained for compatibility consumers, but must never become
+            // live v2 history items. The list mirrors `HasLegacyEvent` in
+            // `codex-rs/protocol/src/legacy_events.rs`.
+            EventMsg::UserMessage(_)
+            | EventMsg::AgentMessage(_)
+            | EventMsg::AgentReasoning(_)
+            | EventMsg::AgentReasoningRawContent(_)
+            | EventMsg::WebSearchBegin(_)
+            | EventMsg::WebSearchEnd(_)
+            | EventMsg::ImageGenerationBegin(_)
+            | EventMsg::ImageGenerationEnd(_)
+            | EventMsg::ExecCommandBegin(_)
+            | EventMsg::ExecCommandEnd(_)
+            | EventMsg::ViewImageToolCall(_)
+            | EventMsg::DynamicToolCallRequest(_)
+            | EventMsg::DynamicToolCallResponse(_)
+            | EventMsg::McpToolCallBegin(_)
+            | EventMsg::McpToolCallEnd(_)
+            | EventMsg::PatchApplyBegin(_)
+            | EventMsg::PatchApplyEnd(_)
+            | EventMsg::CollabAgentSpawnBegin(_)
+            | EventMsg::CollabAgentSpawnEnd(_)
+            | EventMsg::CollabAgentInteractionBegin(_)
+            | EventMsg::CollabAgentInteractionEnd(_)
+            | EventMsg::CollabWaitingBegin(_)
+            | EventMsg::CollabWaitingEnd(_)
+            | EventMsg::CollabCloseBegin(_)
+            | EventMsg::CollabCloseEnd(_)
+            | EventMsg::CollabResumeBegin(_)
+            | EventMsg::CollabResumeEnd(_)
+            | EventMsg::SubAgentActivity(_)
+            | EventMsg::EnteredReviewMode(_)
+            | EventMsg::ExitedReviewMode(_)
+            | EventMsg::ContextCompacted(_) => {}
+            EventMsg::ItemStarted(payload) => self.handle_item_started(payload),
+            EventMsg::ItemCompleted(payload) => self.handle_item_completed(payload),
+            _ => self.handle_non_legacy_live_event(event),
+        }
+    }
+
+    /// Reduces one persisted legacy event during rollout history reconstruction.
+    fn handle_rollout_event(&mut self, event: &EventMsg) {
+        if !matches!(event, EventMsg::AgentMessage(_)) {
+            self.flush_pending_legacy_agent_message();
+        }
         match event {
             EventMsg::UserMessage(payload) => self.handle_user_message(payload),
-            EventMsg::AgentMessage(payload) => self.handle_agent_message(
-                payload.message.clone(),
-                payload.phase.clone(),
-                payload.memory_citation.clone().map(Into::into),
-            ),
+            EventMsg::AgentMessage(payload) => self.stage_legacy_agent_message(payload),
             EventMsg::AgentReasoning(payload) => self.handle_agent_reasoning(payload),
             EventMsg::AgentReasoningRawContent(payload) => {
                 self.handle_agent_reasoning_raw_content(payload)
@@ -390,6 +432,25 @@ impl ThreadHistoryBuilder {
             EventMsg::TurnAborted(payload) => self.handle_turn_aborted(payload),
             EventMsg::TurnStarted(payload) => self.handle_turn_started(payload),
             EventMsg::TurnComplete(payload) => self.handle_turn_complete(payload),
+            _ => self.handle_non_legacy_live_event(event),
+        }
+    }
+
+    /// Reduces events that are not legacy translations and therefore retain their live behavior.
+    fn handle_non_legacy_live_event(&mut self, event: &EventMsg) {
+        match event {
+            EventMsg::GuardianAssessment(payload) => self.handle_guardian_assessment(payload),
+            EventMsg::ApplyPatchApprovalRequest(payload) => {
+                self.handle_apply_patch_approval_request(payload)
+            }
+            EventMsg::Error(payload) => self.handle_error(payload),
+            EventMsg::ThreadRolledBack(payload) => self.handle_thread_rollback(payload),
+            EventMsg::TurnAborted(payload) => self.handle_turn_aborted(payload),
+            EventMsg::TurnStarted(payload) => self.handle_turn_started(payload),
+            EventMsg::TurnComplete(payload) => self.handle_turn_complete(payload),
+            EventMsg::ItemStarted(payload) => self.handle_item_started(payload),
+            EventMsg::ItemCompleted(payload) => self.handle_item_completed(payload),
+            EventMsg::HookStarted(_) | EventMsg::HookCompleted(_) | EventMsg::TokenCount(_) => {}
             _ => {}
         }
     }
@@ -398,21 +459,33 @@ impl ThreadHistoryBuilder {
         self.current_rollout_index = self.next_rollout_index;
         self.next_rollout_index += 1;
         match item {
-            RolloutItem::EventMsg(event) => self.handle_event(event),
-            RolloutItem::Compacted(payload) => self.handle_compacted(payload),
-            RolloutItem::ResponseItem(item) => self.handle_response_item(item),
-            RolloutItem::InterAgentCommunication(_)
-            | RolloutItem::InterAgentCommunicationMetadata { .. }
-            | RolloutItem::TurnContext(_)
-            | RolloutItem::WorldState(_)
-            | RolloutItem::SessionMeta(_) => {}
+            RolloutItem::EventMsg(EventMsg::AgentMessage(payload)) => {
+                self.stage_legacy_agent_message(payload)
+            }
+            RolloutItem::ResponseItem(item) => self.handle_rollout_response_item(item),
+            _ => {
+                self.flush_pending_legacy_agent_message();
+                match item {
+                    // ItemStarted is a live notification and is not written to either rollout
+                    // format. Persisted canonical history is represented by ItemCompleted.
+                    RolloutItem::EventMsg(EventMsg::ItemStarted(_)) => {}
+                    RolloutItem::EventMsg(event) => self.handle_rollout_event(event),
+                    RolloutItem::Compacted(payload) => self.handle_compacted(payload),
+                    RolloutItem::InterAgentCommunication(_)
+                    | RolloutItem::InterAgentCommunicationMetadata { .. }
+                    | RolloutItem::TurnContext(_)
+                    | RolloutItem::WorldState(_)
+                    | RolloutItem::SessionMeta(_)
+                    | RolloutItem::ResponseItem(_) => {}
+                }
+            }
         }
     }
 
     /// Handles one event and returns the materialized items or turn metadata
     /// changed by that event.
-    pub fn handle_event_with_changes(&mut self, event: &EventMsg) -> ThreadHistoryChangeSet {
-        self.collect_changes(|builder| builder.handle_event(event))
+    pub fn handle_live_event_with_changes(&mut self, event: &EventMsg) -> ThreadHistoryChangeSet {
+        self.collect_changes(|builder| builder.handle_live_event(event))
     }
 
     /// Handles a rollout item and returns the materialized items or turn metadata
@@ -471,6 +544,21 @@ impl ThreadHistoryBuilder {
         });
     }
 
+    fn handle_rollout_response_item(&mut self, item: &codex_protocol::models::ResponseItem) {
+        if let codex_protocol::models::ResponseItem::Message { role, .. } = item
+            && role == "assistant"
+        {
+            if self.pending_legacy_agent_message.is_some() {
+                let id = item.id().filter(|id| !id.as_str().is_empty());
+                self.materialize_pending_legacy_agent_message(id);
+            }
+            return;
+        }
+
+        self.flush_pending_legacy_agent_message();
+        self.handle_response_item(item);
+    }
+
     fn handle_user_message(&mut self, payload: &UserMessageEvent) {
         // User messages should stay in explicitly opened turns. For backward
         // compatibility with older streams that did not open turns explicitly,
@@ -490,23 +578,72 @@ impl ThreadHistoryBuilder {
         });
     }
 
-    fn handle_agent_message(
+    fn stage_legacy_agent_message(
         &mut self,
-        text: String,
-        phase: Option<MessagePhase>,
-        memory_citation: Option<crate::protocol::v2::MemoryCitation>,
+        payload: &codex_protocol::protocol::AgentMessageEvent,
     ) {
-        if text.is_empty() {
+        if payload.message.is_empty() {
             return;
         }
 
-        let id = self.next_item_id();
-        self.push_item_in_current_turn(ThreadItem::AgentMessage {
-            id,
-            text,
+        let turn_id = self.ensure_turn().id.clone();
+        let phase = payload.phase.clone();
+        let memory_citation = payload.memory_citation.clone().map(Into::into);
+        let can_append = self
+            .pending_legacy_agent_message
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.turn_id == turn_id
+                    && pending.phase == phase
+                    && pending.memory_citation == memory_citation
+            });
+        if can_append {
+            if let Some(pending) = self.pending_legacy_agent_message.as_mut() {
+                pending.text_parts.push(payload.message.clone());
+            }
+            return;
+        }
+
+        self.flush_pending_legacy_agent_message();
+        self.pending_legacy_agent_message = Some(PendingLegacyAgentMessage {
+            turn_id,
+            rollout_index: self.current_rollout_index,
+            text_parts: vec![payload.message.clone()],
             phase,
             memory_citation,
         });
+    }
+
+    fn materialize_pending_legacy_agent_message(
+        &mut self,
+        response_item_id: Option<&codex_protocol::ResponseItemId>,
+    ) {
+        let Some(pending) = self.pending_legacy_agent_message.take() else {
+            return;
+        };
+        let id = response_item_id
+            .map(ToString::to_string)
+            .unwrap_or_else(|| self.next_item_id());
+        let item = ThreadItem::AgentMessage {
+            id,
+            text: pending.text_parts.concat(),
+            phase: pending.phase,
+            memory_citation: pending.memory_citation,
+        };
+
+        // The assistant response item follows the legacy translation in the rollout. Keep the
+        // staged event's ordinal as the materialization point so turn boundaries and rollback
+        // accounting continue to refer to the legacy event, not its paired response item.
+        let response_rollout_index = self.current_rollout_index;
+        self.current_rollout_index = pending.rollout_index;
+        self.upsert_item_in_turn_id(&pending.turn_id, item);
+        self.current_rollout_index = response_rollout_index;
+    }
+
+    fn flush_pending_legacy_agent_message(&mut self) {
+        if self.pending_legacy_agent_message.is_some() {
+            self.materialize_pending_legacy_agent_message(None);
+        }
     }
 
     fn handle_agent_reasoning(&mut self, payload: &AgentReasoningEvent) {
@@ -607,26 +744,10 @@ impl ThreadHistoryBuilder {
             codex_protocol::items::TurnItem::EnteredReviewMode(_)
                 | codex_protocol::items::TurnItem::ExitedReviewMode(_)
         );
-        let should_upsert = match item {
-            codex_protocol::items::TurnItem::Plan(plan) => !plan.text.is_empty(),
-            codex_protocol::items::TurnItem::HookPrompt(_)
-            | codex_protocol::items::TurnItem::CommandExecution(_)
-            | codex_protocol::items::TurnItem::DynamicToolCall(_)
-            | codex_protocol::items::TurnItem::CollabAgentToolCall(_)
-            | codex_protocol::items::TurnItem::SubAgentActivity(_)
-            | codex_protocol::items::TurnItem::Extension(_)
-            | codex_protocol::items::TurnItem::EnteredReviewMode(_)
-            | codex_protocol::items::TurnItem::ExitedReviewMode(_) => true,
-            codex_protocol::items::TurnItem::UserMessage(_)
-            | codex_protocol::items::TurnItem::AgentMessage(_)
-            | codex_protocol::items::TurnItem::Reasoning(_)
-            | codex_protocol::items::TurnItem::WebSearch(_)
-            | codex_protocol::items::TurnItem::ImageView(_)
-            | codex_protocol::items::TurnItem::ImageGeneration(_)
-            | codex_protocol::items::TurnItem::FileChange(_)
-            | codex_protocol::items::TurnItem::McpToolCall(_)
-            | codex_protocol::items::TurnItem::ContextCompaction(_) => false,
-        };
+        let should_upsert = !matches!(
+            item,
+            codex_protocol::items::TurnItem::Plan(plan) if plan.text.is_empty()
+        );
 
         if should_upsert {
             let item = ThreadItem::from(item.clone());
@@ -1553,6 +1674,14 @@ fn upsert_turn_item(items: &mut Vec<ThreadItem>, item: ThreadItem) -> &ThreadIte
     &items[inserted_item_index]
 }
 
+struct PendingLegacyAgentMessage {
+    turn_id: String,
+    rollout_index: usize,
+    text_parts: Vec<String>,
+    phase: Option<MessagePhase>,
+    memory_citation: Option<crate::protocol::v2::MemoryCitation>,
+}
+
 struct PendingTurn {
     id: String,
     items: Vec<ThreadItem>,
@@ -1709,7 +1838,7 @@ mod tests {
 
         let mut builder = ThreadHistoryBuilder::new();
         for event in &events {
-            builder.handle_event(event);
+            builder.handle_rollout_event(event);
         }
         let turns = builder.finish();
         assert_eq!(turns.len(), 2);
@@ -1808,7 +1937,7 @@ mod tests {
 
         let mut builder = ThreadHistoryBuilder::new();
         for event in &events {
-            builder.handle_event(event);
+            builder.handle_rollout_event(event);
         }
         let turns = builder.finish();
 
@@ -1870,7 +1999,7 @@ mod tests {
 
         let mut builder = ThreadHistoryBuilder::new();
         for event in &events {
-            builder.handle_event(event);
+            builder.handle_rollout_event(event);
         }
         let turns = builder.finish();
 
@@ -3451,7 +3580,7 @@ mod tests {
 
         let mut builder = ThreadHistoryBuilder::new();
         for event in &events {
-            builder.handle_event(event);
+            builder.handle_rollout_event(event);
         }
         let turns = builder.finish();
         assert_eq!(turns.len(), 2);
@@ -3508,7 +3637,7 @@ mod tests {
         ];
 
         for event in &events {
-            builder.handle_event(event);
+            builder.handle_rollout_event(event);
         }
 
         let snapshot = builder
@@ -3578,7 +3707,7 @@ mod tests {
         ];
 
         for event in &events {
-            builder.handle_event(event);
+            builder.handle_rollout_event(event);
         }
 
         let snapshot = builder
@@ -4359,6 +4488,16 @@ mod tests {
     }
 
     #[test]
+    fn ignores_rollout_metadata_during_history_reconstruction() {
+        let turns =
+            build_turns_from_rollout_items(&[RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn: false,
+            }]);
+
+        assert_eq!(turns, Vec::new());
+    }
+
+    #[test]
     fn canonical_hook_prompt_completion_updates_turn_history() {
         let hook_prompt = CoreTurnItem::HookPrompt(codex_protocol::items::HookPromptItem {
             id: "hook-prompt-1".into(),
@@ -4369,14 +4508,14 @@ mod tests {
         });
         let expected_item = ThreadItem::from(hook_prompt.clone());
         let mut builder = ThreadHistoryBuilder::new();
-        builder.handle_event(&EventMsg::TurnStarted(TurnStartedEvent {
+        builder.handle_live_event(&EventMsg::TurnStarted(TurnStartedEvent {
             turn_id: "turn-a".into(),
             trace_id: None,
             started_at: None,
             model_context_window: None,
             collaboration_mode_kind: Default::default(),
         }));
-        builder.handle_event(&EventMsg::ItemCompleted(ItemCompletedEvent {
+        builder.handle_live_event(&EventMsg::ItemCompleted(ItemCompletedEvent {
             thread_id: ThreadId::new(),
             turn_id: "turn-a".into(),
             item: hook_prompt,
@@ -4387,6 +4526,261 @@ mod tests {
         assert_eq!(
             builder.active_turn_snapshot().expect("active turn").items,
             vec![expected_item]
+        );
+    }
+
+    #[test]
+    fn live_canonical_agent_lifecycle_ignores_legacy_translation() {
+        let thread_id = ThreadId::new();
+        let started_item = CoreTurnItem::AgentMessage(codex_protocol::items::AgentMessageItem {
+            id: "msg-1".into(),
+            content: Vec::new(),
+            phase: None,
+            memory_citation: None,
+        });
+        let completed_item = CoreTurnItem::AgentMessage(codex_protocol::items::AgentMessageItem {
+            id: "msg-1".into(),
+            content: vec![codex_protocol::items::AgentMessageContent::Text {
+                text: "canonical answer".into(),
+            }],
+            phase: None,
+            memory_citation: None,
+        });
+        let mut builder = ThreadHistoryBuilder::new();
+        builder.handle_live_event(&EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".into(),
+            trace_id: None,
+            started_at: None,
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        }));
+        builder.handle_live_event(&EventMsg::ItemStarted(ItemStartedEvent {
+            thread_id,
+            turn_id: "turn-1".into(),
+            item: started_item,
+            started_at_ms: 0,
+        }));
+        builder.handle_live_event(&EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id: ThreadId::new(),
+            turn_id: "turn-1".into(),
+            item: completed_item,
+            started_at_ms: Some(0),
+            completed_at_ms: 1,
+        }));
+        builder.handle_live_event(&EventMsg::AgentMessage(AgentMessageEvent {
+            message: "canonical answer".into(),
+            phase: None,
+            memory_citation: None,
+        }));
+
+        assert_eq!(
+            builder.active_turn_snapshot().expect("active turn").items,
+            vec![ThreadItem::AgentMessage {
+                id: "msg-1".into(),
+                text: "canonical answer".into(),
+                phase: None,
+                memory_citation: None,
+            }]
+        );
+    }
+
+    fn assistant_response_item(id: &str, text: &str) -> RolloutItem {
+        RolloutItem::ResponseItem(codex_protocol::models::ResponseItem::Message {
+            id: Some(codex_protocol::ResponseItemId::from_server(id.into())),
+            role: "assistant".into(),
+            content: vec![codex_protocol::models::ContentItem::OutputText { text: text.into() }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        })
+    }
+
+    fn assistant_response_item_without_id(text: &str) -> RolloutItem {
+        RolloutItem::ResponseItem(codex_protocol::models::ResponseItem::Message {
+            id: None,
+            role: "assistant".into(),
+            content: vec![codex_protocol::models::ContentItem::OutputText { text: text.into() }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        })
+    }
+
+    #[test]
+    fn legacy_agent_message_uses_adjacent_response_item_id() {
+        let turns = build_turns_from_rollout_items(&[
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-1".into(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "answer".into(),
+                phase: None,
+                memory_citation: None,
+            })),
+            assistant_response_item("msg-1", "ignored response text"),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-1".into(),
+                started_at: None,
+                last_agent_message: None,
+                error: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            })),
+        ]);
+
+        assert_eq!(
+            turns[0].items,
+            vec![ThreadItem::AgentMessage {
+                id: "msg-1".into(),
+                text: "answer".into(),
+                phase: None,
+                memory_citation: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn consecutive_legacy_agent_message_parts_share_response_item_id() {
+        let turns = build_turns_from_rollout_items(&[
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-1".into(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "first".into(),
+                phase: Some(MessagePhase::FinalAnswer),
+                memory_citation: None,
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "second".into(),
+                phase: Some(MessagePhase::FinalAnswer),
+                memory_citation: None,
+            })),
+            assistant_response_item("msg-1", "response item is not the source text"),
+        ]);
+
+        assert_eq!(
+            turns[0].items,
+            vec![ThreadItem::AgentMessage {
+                id: "msg-1".into(),
+                text: "firstsecond".into(),
+                phase: Some(MessagePhase::FinalAnswer),
+                memory_citation: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn legacy_agent_message_without_response_id_gets_one_synthetic_id() {
+        let turns = build_turns_from_rollout_items(&[
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "first".into(),
+                phase: None,
+                memory_citation: None,
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "second".into(),
+                phase: None,
+                memory_citation: None,
+            })),
+        ]);
+
+        assert_eq!(
+            turns[0].items,
+            vec![ThreadItem::AgentMessage {
+                id: "item-1".into(),
+                text: "firstsecond".into(),
+                phase: None,
+                memory_citation: None,
+            }]
+        );
+
+        let turns = build_turns_from_rollout_items(&[
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "answer".into(),
+                phase: None,
+                memory_citation: None,
+            })),
+            assistant_response_item_without_id("ignored response text"),
+        ]);
+        assert_eq!(turns[0].items[0].id(), "item-1");
+    }
+
+    #[test]
+    fn paginated_canonical_agent_item_and_response_item_are_not_duplicated() {
+        let item = CoreTurnItem::AgentMessage(codex_protocol::items::AgentMessageItem {
+            id: "msg-1".into(),
+            content: vec![codex_protocol::items::AgentMessageContent::Text {
+                text: "answer".into(),
+            }],
+            phase: None,
+            memory_citation: None,
+        });
+        let turns = build_turns_from_rollout_items(&[
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-1".into(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+                thread_id: ThreadId::new(),
+                turn_id: "turn-1".into(),
+                item,
+                started_at_ms: None,
+                completed_at_ms: 1,
+            })),
+            assistant_response_item("msg-1", "answer"),
+        ]);
+
+        assert_eq!(turns[0].items.len(), 1);
+        assert_eq!(turns[0].items[0].id(), "msg-1");
+    }
+
+    #[test]
+    fn distinct_canonical_agent_ids_with_identical_text_remain_distinct() {
+        let canonical_item = |id: &str| {
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+                thread_id: ThreadId::new(),
+                turn_id: "turn-1".into(),
+                item: CoreTurnItem::AgentMessage(codex_protocol::items::AgentMessageItem {
+                    id: id.into(),
+                    content: vec![codex_protocol::items::AgentMessageContent::Text {
+                        text: "same".into(),
+                    }],
+                    phase: None,
+                    memory_citation: None,
+                }),
+                started_at_ms: None,
+                completed_at_ms: 1,
+            }))
+        };
+        let turns = build_turns_from_rollout_items(&[
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-1".into(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            canonical_item("msg-1"),
+            canonical_item("msg-2"),
+        ]);
+
+        assert_eq!(
+            turns[0]
+                .items
+                .iter()
+                .map(ThreadItem::id)
+                .collect::<Vec<_>>(),
+            vec!["msg-1", "msg-2"]
         );
     }
 

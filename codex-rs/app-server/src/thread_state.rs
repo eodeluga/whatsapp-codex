@@ -169,7 +169,7 @@ impl ThreadState {
             self.turn_summary.last_agent_message =
                 Some(ThreadItem::from(CoreTurnItem::AgentMessage(item.clone())));
         }
-        self.current_turn_history.handle_event(event);
+        self.current_turn_history.handle_live_event(event);
         if matches!(event, EventMsg::TurnAborted(_) | EventMsg::TurnComplete(_)) {
             self.last_terminal_turn_id = Some(event_turn_id.to_string());
             if !self.current_turn_history.has_active_turn() {
@@ -243,6 +243,56 @@ mod tests {
         ];
 
         assert_eq!(results, vec![true, false, true, false]);
+    }
+
+    #[test]
+    fn track_current_turn_event_uses_canonical_item_identity() {
+        let mut state = ThreadState::default();
+        state.track_current_turn_event(
+            "turn-1",
+            &EventMsg::TurnStarted(codex_protocol::protocol::TurnStartedEvent {
+                turn_id: "turn-1".to_string(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }),
+        );
+        state.track_current_turn_event(
+            "turn-1",
+            &EventMsg::ItemCompleted(codex_protocol::protocol::ItemCompletedEvent {
+                thread_id: ThreadId::new(),
+                turn_id: "turn-1".to_string(),
+                item: CoreTurnItem::AgentMessage(codex_protocol::items::AgentMessageItem {
+                    id: "msg-1".to_string(),
+                    content: vec![CoreAgentMessageContent::Text {
+                        text: "canonical answer".to_string(),
+                    }],
+                    phase: None,
+                    memory_citation: None,
+                }),
+                started_at_ms: Some(0),
+                completed_at_ms: 1,
+            }),
+        );
+        state.track_current_turn_event(
+            "turn-1",
+            &EventMsg::AgentMessage(codex_protocol::protocol::AgentMessageEvent {
+                message: "canonical answer".to_string(),
+                phase: None,
+                memory_citation: None,
+            }),
+        );
+
+        assert_eq!(
+            state.active_turn_snapshot().expect("active turn").items,
+            vec![ThreadItem::AgentMessage {
+                id: "msg-1".to_string(),
+                text: "canonical answer".to_string(),
+                phase: None,
+                memory_citation: None,
+            }]
+        );
     }
 
     fn thread_settings(model: &str) -> ThreadSettings {

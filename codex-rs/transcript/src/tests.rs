@@ -109,6 +109,57 @@ fn completed_item_replaces_partial_text_and_commits_it() {
 }
 
 #[test]
+fn canonical_ids_make_reconciliation_idempotent_and_distinct() {
+    let mut projector = TranscriptProjector::default();
+    let first = ThreadItem::AgentMessage {
+        id: "msg-1".to_owned(),
+        text: "same text".to_owned(),
+        phase: Some(MessagePhase::FinalAnswer),
+        memory_citation: None,
+    };
+    let events = projector.apply(ServerNotification::ItemCompleted(
+        ItemCompletedNotification {
+            thread_id: "thread-1".to_owned(),
+            turn_id: "turn-1".to_owned(),
+            item: first.clone(),
+            completed_at_ms: 1,
+        },
+    ));
+    assert!(matches!(events.as_slice(), [ProjectionEvent::Entry(_)]));
+    assert!(
+        projector
+            .reconcile_items("thread-1", "turn-1", std::slice::from_ref(&first))
+            .is_empty()
+    );
+
+    let revised = ThreadItem::AgentMessage {
+        id: "msg-1".to_owned(),
+        text: "revised text".to_owned(),
+        phase: Some(MessagePhase::FinalAnswer),
+        memory_citation: None,
+    };
+    let events = projector.reconcile_items("thread-1", "turn-1", std::slice::from_ref(&revised));
+    assert!(matches!(events.as_slice(), [ProjectionEvent::Entry(_)]));
+
+    let second = ThreadItem::AgentMessage {
+        id: "msg-2".to_owned(),
+        text: "revised text".to_owned(),
+        phase: Some(MessagePhase::FinalAnswer),
+        memory_citation: None,
+    };
+    let events = projector.reconcile_items("thread-1", "turn-1", &[revised, second]);
+    assert!(matches!(events.as_slice(), [ProjectionEvent::Entry(_)]));
+    assert_eq!(
+        projector
+            .entries()
+            .iter()
+            .map(|entry| entry.key.item_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["msg-1", "msg-2"]
+    );
+}
+
+#[test]
 fn late_item_start_does_not_erase_streamed_content() {
     let mut projector = TranscriptProjector::default();
     projector.apply(ServerNotification::AgentMessageDelta(

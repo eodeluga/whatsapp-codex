@@ -2,6 +2,9 @@
   "name": "codex-baileys-transport",
   "private": true,
   "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
   "dependencies": {
     "@whiskeysockets/baileys": "7.0.0-rc14",
     "pino": "9.7.0",

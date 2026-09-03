@@ -26,6 +26,7 @@ pub use model::ProviderAdapter;
 pub use model::ProviderAttachment;
 pub use model::ProviderCapabilities;
 pub use model::ProviderConversationId;
+pub use model::ProviderDeliveryId;
 pub use model::ProviderError;
 pub use model::ProviderMessageId;
 pub use model::ProviderStatus;

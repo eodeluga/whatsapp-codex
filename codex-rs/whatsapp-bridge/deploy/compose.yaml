@@ -10,6 +10,7 @@ services:
       - ${CODEX_HOME:-${HOME}/.codex}/whatsapp:/codex-home/whatsapp:ro
       - ${CODEX_HOME:-${HOME}/.codex}/whatsapp/attachments:${CODEX_HOME:-${HOME}/.codex}/whatsapp/attachments
       - baileys-auth:/data/auth
+      - baileys-delivery:/data/delivery
     networks: [transport-egress]
     healthcheck:
       test:
@@ -55,3 +56,4 @@ networks:
 
 volumes:
   baileys-auth:
+  baileys-delivery:
