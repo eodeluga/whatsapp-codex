@@ -160,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
         .with_transcript_options(TranscriptProjectionOptions {
             include_reasoning: bridge_config.include_reasoning,
             include_tool_calls: bridge_config.include_tool_calls,
+            include_automatic_approval_reviews: bridge_config.include_automatic_approval_reviews,
         })
         .with_approval_notices(bridge_config.include_approval_notices)
         .run(command_rx),
