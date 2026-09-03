@@ -5,11 +5,20 @@ use crate::codex::CodexError;
 use crate::codex::ThreadSummary;
 use crate::transport::TransportError;
 use crate::transport::TransportStatus;
+use codex_app_server_protocol::ApprovalsReviewer;
+use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ItemCompletedNotification;
+use codex_app_server_protocol::SandboxPolicy;
 use codex_app_server_protocol::ServerNotification;
+use codex_app_server_protocol::SessionSource;
+use codex_app_server_protocol::Thread;
+use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadResumeResponse;
+use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::ToolRequestUserInputParams;
 use codex_app_server_protocol::ToolRequestUserInputQuestion;
+use codex_app_server_protocol::Turn;
+use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::UserInput;
 use codex_messaging::DeliveryWorker;
 use codex_messaging::FileDeliveryStore;
@@ -522,6 +531,160 @@ async fn canonical_reconciliation_revises_one_delivery_and_keeps_distinct_ids() 
     delivery_task.await.unwrap();
 }
 
+#[tokio::test]
+async fn active_turn_reconciliation_does_not_redeliver_canonical_item() {
+    let directory = tempdir().unwrap();
+    let state_path = directory.path().join("state.json");
+    let transport = FakeTransport::default();
+    let sent = Arc::clone(&transport.sent);
+    let codex = FakeCodex::default();
+    let canonical = ThreadItem::AgentMessage {
+        id: "msg-1".to_string(),
+        text: "same answer".to_string(),
+        phase: None,
+        memory_citation: None,
+    };
+    codex
+        .resume_response
+        .lock()
+        .unwrap()
+        .replace(resume_response_with_turn(
+            vec![canonical.clone()],
+            TurnStatus::InProgress,
+        ));
+    let mut state = BridgeState::empty();
+    state.binding = Some(crate::state::ThreadBinding {
+        self_chat_id: "447700900000@c.us".to_string(),
+        codex_thread_id: "thread-1".to_string(),
+    });
+    state.active_turn = Some(crate::state::ActiveTurn {
+        inbound_message_id: "message-1".to_string(),
+        thread_id: "thread-1".to_string(),
+        codex_turn_id: "turn-1".to_string(),
+        legacy_working_output_message_id: None,
+        attachment_paths: Vec::new(),
+    });
+    let (command_catalog, command_catalog_path) =
+        CommandCatalog::load_or_create(directory.path()).unwrap();
+    let readiness = Arc::new(BridgeReadiness::new(BridgeReadinessSnapshot {
+        ready: true,
+        state_healthy: true,
+        app_server_connected: true,
+        transport_healthy: true,
+    }));
+    let mut coordinator = Coordinator::new(
+        codex,
+        transport.clone(),
+        state,
+        state_path,
+        directory.path().join("attachments"),
+        "447700900000".to_string(),
+        "447700900000@c.us".to_string(),
+        3_500,
+        1_500,
+        20,
+        100,
+        24,
+        command_catalog,
+        command_catalog_path,
+        readiness,
+        true,
+        true,
+    );
+    let (delivery_events, _delivery_event_rx) = mpsc::channel(16);
+    let delivery_worker = DeliveryWorker::new(
+        transport,
+        FileDeliveryStore::new(directory.path().join("delivery.json")),
+        delivery_events,
+        std::time::Duration::from_millis(1),
+    )
+    .await
+    .unwrap();
+    let (delivery, delivery_commands) =
+        DeliveryWorker::<FakeTransport, FileDeliveryStore>::channel(8);
+    coordinator.delivery = Some(delivery.clone());
+    let delivery_task = tokio::spawn(delivery_worker.run(delivery_commands));
+
+    coordinator
+        .handle_event(AppServerEvent::ServerNotification(
+            ServerNotification::ItemCompleted(ItemCompletedNotification {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                item: canonical,
+                completed_at_ms: 1,
+            }),
+        ))
+        .await;
+    wait_for_sent(&sent, 1).await;
+
+    coordinator.reconcile_active_turn().await;
+    coordinator.app_server_connected = false;
+    assert!(coordinator.resume_after_reconnect().await);
+
+    tokio::task::yield_now().await;
+    assert_eq!(*sent.lock().unwrap(), vec!["same answer".to_string()]);
+    delivery.shutdown().await;
+    delivery_task.await.unwrap();
+}
+
+fn resume_response_with_turn(items: Vec<ThreadItem>, status: TurnStatus) -> ThreadResumeResponse {
+    let cwd = codex_utils_absolute_path::AbsolutePathBuf::try_from(std::path::PathBuf::from("/"))
+        .unwrap();
+    ThreadResumeResponse {
+        thread: Thread {
+            id: "thread-1".to_string(),
+            extra: None,
+            session_id: "thread-1".to_string(),
+            forked_from_id: None,
+            parent_thread_id: None,
+            preview: String::new(),
+            ephemeral: false,
+            section: None,
+            history_mode: ThreadHistoryMode::Legacy,
+            model_provider: "openai".to_string(),
+            created_at: 1,
+            updated_at: 1,
+            recency_at: Some(1),
+            status: ThreadStatus::Idle,
+            path: None,
+            cwd: cwd.clone(),
+            cli_version: "0.0.0".to_string(),
+            source: SessionSource::AppServer,
+            can_accept_direct_input: Some(true),
+            thread_source: None,
+            agent_nickname: None,
+            agent_role: None,
+            git_info: None,
+            name: None,
+            turns: vec![Turn {
+                id: "turn-1".to_string(),
+                items,
+                items_view: TurnItemsView::Full,
+                status,
+                error: None,
+                started_at: Some(1),
+                completed_at: None,
+                duration_ms: None,
+            }],
+        },
+        model: "gpt-5".to_string(),
+        model_provider: "openai".to_string(),
+        service_tier: None,
+        cwd,
+        runtime_workspace_roots: Vec::new(),
+        instruction_sources: Vec::new(),
+        approval_policy: AskForApproval::OnRequest,
+        approvals_reviewer: ApprovalsReviewer::User,
+        sandbox: SandboxPolicy::DangerFullAccess,
+        active_permission_profile: None,
+        reasoning_effort: None,
+        multi_agent_mode: Default::default(),
+        initial_turns_page: None,
+        turns_backwards_cursor: None,
+        items_backwards_cursor: None,
+    }
+}
+
 async fn wait_for_sent(sent: &Arc<Mutex<Vec<String>>>, count: usize) {
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
@@ -542,6 +705,7 @@ struct FakeCodex {
     rejects: Arc<Mutex<Vec<RequestId>>>,
     resolves: Arc<Mutex<Vec<serde_json::Value>>>,
     start_thread_fails: Arc<AtomicBool>,
+    resume_response: Arc<Mutex<Option<ThreadResumeResponse>>>,
 }
 
 impl CodexClient for FakeCodex {
@@ -554,7 +718,11 @@ impl CodexClient for FakeCodex {
     }
 
     async fn resume_thread(&self, _thread_id: String) -> Result<ThreadResumeResponse, CodexError> {
-        Err(CodexError::Transport("test failure".to_string()))
+        self.resume_response
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| CodexError::Transport("test failure".to_string()))
     }
 
     async fn list_threads(&self) -> Result<Vec<ThreadSummary>, CodexError> {
