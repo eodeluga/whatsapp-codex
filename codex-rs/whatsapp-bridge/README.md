@@ -26,11 +26,29 @@ needs the host workspace mounted.
 The bridge reads the user-owned `[whatsapp]` table from Codex's normal
 `config.toml` and private generated state from
 `CODEX_HOME/whatsapp/runtime.json`; durable transcript delivery is kept in a sibling
-private journal. Users must not create Baileys transport credentials,
+private journal. Canonical app-server item IDs remain stable through streaming and
+active-turn reconciliation, so revisions edit one provider message instead of
+creating another. Users must not create Baileys transport credentials,
 session IDs, API keys, webhook URLs, or signing secrets manually.
 Provider message limits and edit scheduling are adapter/worker capabilities;
 legacy runtime chunk and edit fields are read for compatibility but are not
 used or written by current bridge state.
+
+Each pending provider segment receives a durable, provider-neutral delivery operation
+ID before its first send. Retries reuse the operation ID. The Rust worker persists the
+provider message as `Sent` before attempting acknowledgement; an acknowledgement
+failure leaves it `Sent` and retries acknowledgement without resending. The Baileys
+gateway stores only SHA-256 hashes of the chat and text, plus the operation mapping,
+in `/data/delivery/idempotency.json` on the named `baileys-delivery` volume. Its
+status diagnostics expose counts for `prepared`, `sent`, and `acknowledged` records;
+unacknowledged records are retained across restarts and more than 10,000 marks the
+gateway degraded for operator intervention.
+
+The residual guarantee is intentionally explicit: if the gateway crashes after
+WhatsApp accepts a message but before it records `sent`, retrying the same Baileys
+message ID is expected to be deduplicated by WhatsApp/Baileys. This narrows the
+at-least-once ambiguity window but is not a strict exactly-once guarantee without a
+provider acknowledgement or query API.
 
 Remote output policy is configured in the top-level `[bridge]` table, shared by
 all provider adapters rather than nested under `[whatsapp]`:
@@ -95,22 +113,24 @@ docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml logs -f \
 docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml restart
 ```
 
-Container restarts preserve the named `baileys-auth` volume and the bridge state
+Container restarts preserve the named `baileys-auth` and `baileys-delivery` volumes,
+as well as the bridge state
 under `CODEX_HOME/whatsapp/`. Persisted inactive Baileys transport sessions are restarted
 automatically. Do not remove the volume unless deliberately resetting the
-linked WhatsApp session.
+linked WhatsApp session. Do not remove either named volume during routine restart,
+upgrade, or troubleshooting.
 
 Both services use `restart: unless-stopped`. The bridge has an end-to-end
 healthcheck but handles dependency outages through its bounded reconnect loop,
 so a temporary app-server or WhatsApp outage does not create a restart storm.
 
-To rebuild only this bridge after a source change:
+To rebuild the bridge and gateway after a source change:
 
 ```shell
 docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml \
-  build codex-whatsapp-bridge
+  build baileys-gateway codex-whatsapp-bridge
 docker compose -f codex-rs/whatsapp-bridge/deploy/compose.yaml \
-  up -d --no-deps --force-recreate codex-whatsapp-bridge
+  up -d --force-recreate
 ```
 
 The bridge image compiles its own release binary. The repository
@@ -178,4 +198,11 @@ just test -p codex-whatsapp-bridge
 ```
 
 The bridge test suite covers webhook signatures and filtering, Baileys transport request
-shapes, durable event deduplication, and bounded app-server outage reporting.
+shapes, canonical reconciliation, durable delivery IDs, idempotency conflicts, durable
+event deduplication, and bounded app-server outage reporting. The gateway's extracted
+store and handler tests run with:
+
+```shell
+cd codex-rs/whatsapp-bridge/baileys-gateway
+npm test
+```

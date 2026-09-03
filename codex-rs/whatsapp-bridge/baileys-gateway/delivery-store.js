@@ -211,6 +211,7 @@ export const createDeliveryHandler = ({ store, sendMessage, generateMessageId, r
     try {
       await sendMessage({ chatId, messageId: prepared.providerMessageId, text });
       await store.markSentUnlocked(deliveryId);
+      rememberOutboundMessage(prepared.providerMessageId);
       return { statusCode: 201, body: { id: prepared.providerMessageId } };
     } catch (error) {
       forgetOutboundMessage(prepared.providerMessageId);
