@@ -3,6 +3,7 @@
 use codex_messaging::ProviderAdapter;
 use codex_messaging::ProviderCapabilities;
 use codex_messaging::ProviderConversationId;
+use codex_messaging::ProviderDeliveryId;
 use codex_messaging::ProviderError;
 use codex_messaging::ProviderMessageId;
 use codex_messaging::ProviderStatus;
@@ -24,6 +25,8 @@ pub enum TransportError {
     Unavailable,
     #[error("remote transport returned an invalid response")]
     InvalidResponse,
+    #[error("remote transport rejected a reused delivery id for different content")]
+    IdempotencyConflict,
     #[error("remote transport text is too long")]
     TextTooLong,
 }
@@ -35,9 +38,15 @@ pub trait TransportClient: Send + Sync {
     ) -> impl std::future::Future<Output = Result<TransportStatus, TransportError>> + Send;
     fn send_text(
         &self,
+        delivery_id: String,
         chat_id: String,
         text: String,
     ) -> impl std::future::Future<Output = Result<String, TransportError>> + Send;
+    fn acknowledge_delivery(
+        &self,
+        delivery_id: String,
+        message_id: String,
+    ) -> impl std::future::Future<Output = Result<(), TransportError>> + Send;
     fn edit_text(
         &self,
         chat_id: String,
@@ -95,7 +104,12 @@ impl TransportClient for HttpTransportClient {
             .map_err(|_| TransportError::InvalidResponse)
     }
 
-    async fn send_text(&self, chat_id: String, text: String) -> Result<String, TransportError> {
+    async fn send_text(
+        &self,
+        delivery_id: String,
+        chat_id: String,
+        text: String,
+    ) -> Result<String, TransportError> {
         if text.chars().count() > MAX_TEXT_CHARS {
             return Err(TransportError::TextTooLong);
         }
@@ -103,17 +117,41 @@ impl TransportClient for HttpTransportClient {
             .authorised(
                 self.client
                     .post(format!("{}/v1/messages", self.base_url))
-                    .json(&SendTextRequest { chat_id, text }),
+                    .json(&SendTextRequest {
+                        delivery_id,
+                        chat_id,
+                        text,
+                    }),
             )
             .send()
             .await
             .map_err(|_| TransportError::Transport)?;
-        ensure_success(response.status())?;
+        ensure_send_success(response.status())?;
         response
             .json::<SendTextResponse>()
             .await
             .map(|response| response.id)
             .map_err(|_| TransportError::InvalidResponse)
+    }
+
+    async fn acknowledge_delivery(
+        &self,
+        delivery_id: String,
+        message_id: String,
+    ) -> Result<(), TransportError> {
+        let response = self
+            .authorised(
+                self.client
+                    .post(format!("{}/v1/messages/ack", self.base_url))
+                    .json(&AcknowledgeDeliveryRequest {
+                        delivery_id,
+                        message_id,
+                    }),
+            )
+            .send()
+            .await
+            .map_err(|_| TransportError::Transport)?;
+        ensure_success(response.status())
     }
 
     async fn edit_text(
@@ -179,13 +217,33 @@ impl ProviderAdapter for HttpTransportClient {
 
     async fn send_text(
         &self,
+        delivery_id: ProviderDeliveryId,
         conversation_id: ProviderConversationId,
         text: String,
     ) -> Result<ProviderMessageId, ProviderError> {
-        TransportClient::send_text(self, conversation_id.as_str().to_string(), text)
-            .await
-            .map(ProviderMessageId::new)
-            .map_err(provider_error)
+        TransportClient::send_text(
+            self,
+            delivery_id.as_str().to_string(),
+            conversation_id.as_str().to_string(),
+            text,
+        )
+        .await
+        .map(ProviderMessageId::new)
+        .map_err(provider_error)
+    }
+
+    async fn acknowledge_delivery(
+        &self,
+        delivery_id: ProviderDeliveryId,
+        message_id: ProviderMessageId,
+    ) -> Result<(), ProviderError> {
+        TransportClient::acknowledge_delivery(
+            self,
+            delivery_id.as_str().to_string(),
+            message_id.as_str().to_string(),
+        )
+        .await
+        .map_err(provider_error)
     }
 
     async fn edit_text(
@@ -211,14 +269,22 @@ fn provider_error(error: TransportError) -> ProviderError {
         TransportError::Unauthorized => ProviderError::Unauthorized,
         TransportError::Unavailable => ProviderError::Unavailable,
         TransportError::InvalidResponse => ProviderError::InvalidResponse,
+        TransportError::IdempotencyConflict => ProviderError::IdempotencyConflict,
     }
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SendTextRequest {
+    delivery_id: String,
     chat_id: String,
     text: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AcknowledgeDeliveryRequest {
+    delivery_id: String,
+    message_id: String,
 }
 #[derive(Deserialize)]
 struct SendTextResponse {
@@ -244,6 +310,13 @@ fn ensure_success(status: StatusCode) -> Result<(), TransportError> {
         status if status.is_success() => Ok(()),
         _ => Err(TransportError::InvalidResponse),
     }
+}
+
+fn ensure_send_success(status: StatusCode) -> Result<(), TransportError> {
+    if status == StatusCode::CONFLICT {
+        return Err(TransportError::IdempotencyConflict);
+    }
+    ensure_success(status)
 }
 
 #[cfg(test)]

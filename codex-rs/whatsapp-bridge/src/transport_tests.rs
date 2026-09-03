@@ -1,6 +1,7 @@
 use super::*;
 use codex_messaging::ProviderAdapter;
 use codex_messaging::ProviderConversationId;
+use codex_messaging::ProviderDeliveryId;
 use codex_messaging::ProviderMessageId;
 use serde_json::json;
 use wiremock::Mock;
@@ -29,10 +30,22 @@ async fn http_adapter_matches_gateway_contract() {
         .and(path("/v1/messages"))
         .and(header("authorization", "Bearer test-token"))
         .and(body_json(json!({
+            "deliveryId": "delivery-1",
             "chatId": "447700900000@c.us",
             "text": "hello"
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "message-1"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/ack"))
+        .and(header("authorization", "Bearer test-token"))
+        .and(body_json(json!({
+            "deliveryId": "delivery-1",
+            "messageId": "message-1"
+        })))
+        .respond_with(ResponseTemplate::new(204))
         .expect(1)
         .mount(&server)
         .await;
@@ -62,6 +75,7 @@ async fn http_adapter_matches_gateway_contract() {
     assert_eq!(
         ProviderAdapter::send_text(
             &transport,
+            ProviderDeliveryId::new("delivery-1"),
             ProviderConversationId::new("447700900000@c.us"),
             "hello".to_string(),
         )
@@ -77,4 +91,34 @@ async fn http_adapter_matches_gateway_contract() {
     )
     .await
     .unwrap();
+    ProviderAdapter::acknowledge_delivery(
+        &transport,
+        ProviderDeliveryId::new("delivery-1"),
+        ProviderMessageId::new("message-1"),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn gateway_idempotency_conflict_is_a_permanent_provider_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(409))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let transport = HttpTransportClient::new(server.uri(), "test-token".to_string()).unwrap();
+    assert_eq!(
+        ProviderAdapter::send_text(
+            &transport,
+            ProviderDeliveryId::new("delivery-1"),
+            ProviderConversationId::new("chat"),
+            "hello".to_string(),
+        )
+        .await,
+        Err(ProviderError::IdempotencyConflict)
+    );
 }

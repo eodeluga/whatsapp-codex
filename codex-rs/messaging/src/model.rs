@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::fmt;
 use thiserror::Error;
+use uuid::Uuid;
 
 /// An opaque provider conversation identifier.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -26,6 +27,30 @@ impl From<String> for ProviderConversationId {
 }
 
 impl fmt::Display for ProviderConversationId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// An opaque provider-neutral idempotency key for one delivery operation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProviderDeliveryId(String);
+
+impl ProviderDeliveryId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn generate() -> Self {
+        Self::new(Uuid::new_v4().to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ProviderDeliveryId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
     }
@@ -107,6 +132,8 @@ pub enum ProviderError {
     Unavailable,
     #[error("provider returned an invalid response")]
     InvalidResponse,
+    #[error("provider rejected a reused delivery id for different content")]
+    IdempotencyConflict,
 }
 
 /// A provider-neutral adapter consumed by the delivery worker.
@@ -119,9 +146,16 @@ pub trait ProviderAdapter: Send + Sync {
 
     fn send_text(
         &self,
+        delivery_id: ProviderDeliveryId,
         conversation_id: ProviderConversationId,
         text: String,
     ) -> impl std::future::Future<Output = Result<ProviderMessageId, ProviderError>> + Send;
+
+    fn acknowledge_delivery(
+        &self,
+        delivery_id: ProviderDeliveryId,
+        message_id: ProviderMessageId,
+    ) -> impl std::future::Future<Output = Result<(), ProviderError>> + Send;
 
     fn edit_text(
         &self,
