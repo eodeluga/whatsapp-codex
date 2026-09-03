@@ -42,6 +42,7 @@ impl TranscriptState {
             projector: TranscriptProjector::new(TranscriptProjectionOptions {
                 include_reasoning: true,
                 include_tool_calls: true,
+                include_automatic_approval_reviews: true,
             }),
             active_cell,
             ..Self::default()

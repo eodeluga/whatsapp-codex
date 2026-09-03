@@ -1,6 +1,7 @@
 use super::*;
 use codex_app_server_protocol::AgentMessageDeltaNotification;
 use codex_app_server_protocol::ErrorNotification;
+use codex_app_server_protocol::GuardianWarningNotification;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::PatchApplyStatus;
@@ -175,6 +176,7 @@ fn reasoning_is_allowlisted_but_disabled_by_default() {
     let mut projector = TranscriptProjector::new(TranscriptProjectionOptions {
         include_reasoning: true,
         include_tool_calls: false,
+        include_automatic_approval_reviews: false,
     });
     let events = projector.apply(notification);
     assert!(matches!(events.as_slice(), [ProjectionEvent::Entry(_)]));
@@ -200,12 +202,40 @@ fn tool_calls_are_allowlisted_but_disabled_by_default() {
     let mut projector = TranscriptProjector::new(TranscriptProjectionOptions {
         include_reasoning: false,
         include_tool_calls: true,
+        include_automatic_approval_reviews: false,
     });
     let events = projector.reconcile_items("thread-1", "turn-1", &[tool_call]);
     assert!(matches!(events.as_slice(), [ProjectionEvent::Entry(_)]));
     assert_eq!(
         projector.entries()[0].plain_text().as_deref(),
         Some("file changes: InProgress · 0 changes")
+    );
+}
+
+#[test]
+fn automatic_approval_reviews_are_allowlisted_but_disabled_by_default() {
+    let notification = ServerNotification::GuardianWarning(GuardianWarningNotification {
+        thread_id: "thread-1".to_owned(),
+        message: "Automatic approval review approved the requested action.".to_owned(),
+    });
+    assert_eq!(
+        TranscriptProjector::default().apply(notification.clone()),
+        vec![ProjectionEvent::Suppressed]
+    );
+
+    let mut projector = TranscriptProjector::new(TranscriptProjectionOptions {
+        include_reasoning: false,
+        include_tool_calls: false,
+        include_automatic_approval_reviews: true,
+    });
+    let events = projector.apply(notification);
+    assert!(matches!(events.as_slice(), [ProjectionEvent::Notice(_)]));
+    assert_eq!(
+        match &events[0] {
+            ProjectionEvent::Notice(notice) => notice.text.as_str(),
+            _ => unreachable!(),
+        },
+        "Automatic approval review approved the requested action."
     );
 }
 

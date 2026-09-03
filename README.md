@@ -99,8 +99,9 @@ behavior is limited to the transport and these bridge operations:
 
 Plain text during an active steerable turn uses `turn/steer`. Transcript items
 are mirrored through the shared semantic projector as they stream. Commentary,
-plans, and final answers are delivered by default; reasoning summaries and
-tool-call activity require the shared `[bridge]` options. WhatsApp only
+plans, and final answers are delivered by default; reasoning summaries,
+tool-call activity, approval notices, and automatic review outcomes require the
+shared `[bridge]` options. WhatsApp only
 segments content at its provider limit and does not add normal-output prefixes
 or chunk labels. Approval choices
 have no user-visible IDs and are exactly the choices supplied by Codex. An
@@ -122,10 +123,11 @@ enabled = true
 account_phone_number = "+447700900000"
 
 [bridge]
-# All three options default to false when omitted.
+# All four options default to false when omitted.
 include_reasoning = false
 include_tool_calls = false
 include_approval_notices = false
+include_automatic_approval_reviews = false
 ```
 
 Private runtime data is stored under `~/.codex/whatsapp/`. There is no
@@ -137,11 +139,14 @@ durable delivery worker; the old runtime chunk/edit tuning fields are accepted
 only when reading an existing runtime file and are omitted when it is rewritten.
 
 The top-level `[bridge]` options are shared by every remote provider adapter.
-Reasoning output, tool-call activity, and command/file-change approval notices
-are allowlisted but off by default. Permission requests remain available and
-are not controlled by `include_approval_notices`. When approval notices are
-disabled, command and file-change approval requests are rejected rather than
-left waiting for an invisible reply.
+Reasoning output, tool-call activity, command/file-change approval notices, and
+automatic approval review messages are allowlisted but off by default.
+Permission requests remain available and are not controlled by
+`include_approval_notices`. When approval notices are disabled, command and
+file-change approval requests are rejected rather than left waiting for an
+invisible reply. Set `include_automatic_approval_reviews = true` to surface
+Guardian automatic approval review outcomes in remote provider output; this
+does not enable automatic review or change approval policy.
 
 Each active turn also emits a provider-neutral bridge status at most once per
 category: `[codex working...]`, `[codex reasoning...]`, and `[codex tooling]`.

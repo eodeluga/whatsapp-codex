@@ -62,6 +62,7 @@ pub(crate) fn thread_to_transcript_cells(
     let mut projector = TranscriptProjector::new(TranscriptProjectionOptions {
         include_reasoning: true,
         include_tool_calls: true,
+        include_automatic_approval_reviews: true,
     });
     for turn in &thread.turns {
         projector.reconcile_items(&thread.id, &turn.id, &turn.items);
