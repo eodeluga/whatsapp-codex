@@ -169,7 +169,7 @@ impl ThreadState {
             self.turn_summary.last_agent_message =
                 Some(ThreadItem::from(CoreTurnItem::AgentMessage(item.clone())));
         }
-        self.current_turn_history.handle_event(event);
+        self.current_turn_history.handle_live_event(event);
         if matches!(event, EventMsg::TurnAborted(_) | EventMsg::TurnComplete(_)) {
             self.last_terminal_turn_id = Some(event_turn_id.to_string());
             if !self.current_turn_history.has_active_turn() {
