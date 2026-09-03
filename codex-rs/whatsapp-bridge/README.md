@@ -40,12 +40,16 @@ all provider adapters rather than nested under `[whatsapp]`:
 include_reasoning = false
 include_tool_calls = false
 include_approval_notices = false
+include_automatic_approval_reviews = false
 ```
 
-All three categories are allowlisted and default to off. Permission requests
+All four categories are allowlisted and default to off. Permission requests
 remain available regardless of `include_approval_notices`. With approval
 notices disabled, command and file-change approval requests are rejected rather
-than left waiting for an invisible reply.
+than left waiting for an invisible reply. Set
+`include_automatic_approval_reviews = true` to surface Guardian automatic
+approval review outcomes; this does not enable automatic review or change the
+approval policy.
 
 For every active turn, the bridge may also emit these provider-neutral short
 statuses, at most once each: `[codex working...]`, `[codex reasoning...]`, and
@@ -133,11 +137,12 @@ The bridge-specific behavior is limited to:
 - webhook deduplication, durable delivery, reconnect handling, and health/pairing
   endpoints.
 
-Normal Codex transcript items are projected and delivered as they stream. Commentary,
-plans, and final answers retain their item order by default. Reasoning summaries,
-tool activity, and command/file-change approval notices are delivered only when
-enabled in the shared `[bridge]` policy; provider segmentation is lossless and
-does not add bridge prefixes or chunk labels.
+Normal Codex transcript items are projected and delivered as they stream.
+Commentary, plans, and final answers retain their item order by default.
+Reasoning summaries, tool activity, command/file-change approval notices, and
+automatic approval review messages are delivered only when enabled in the
+shared `[bridge]` policy; provider segmentation is lossless and does not add
+bridge prefixes or chunk labels.
 
 The bridge does not implement or advertise the TUI-only approval retry flow or
 the general TUI slash-command set. `/approve`, `/approve-session`, and `/deny`
