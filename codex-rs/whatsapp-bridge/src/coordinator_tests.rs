@@ -18,6 +18,7 @@ use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::ToolRequestUserInputParams;
 use codex_app_server_protocol::ToolRequestUserInputQuestion;
 use codex_app_server_protocol::Turn;
+use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::UserInput;
 use codex_messaging::DeliveryWorker;
@@ -623,6 +624,197 @@ async fn active_turn_reconciliation_does_not_redeliver_canonical_item() {
 
     tokio::task::yield_now().await;
     assert_eq!(*sent.lock().unwrap(), vec!["same answer".to_string()]);
+    delivery.shutdown().await;
+    delivery_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_event_reconciles_items_missing_from_the_event_stream() {
+    let directory = tempdir().unwrap();
+    let state_path = directory.path().join("state.json");
+    let transport = FakeTransport::default();
+    let sent = Arc::clone(&transport.sent);
+    let codex = FakeCodex::default();
+    codex
+        .resume_response
+        .lock()
+        .unwrap()
+        .replace(resume_response_with_turn(
+            vec![ThreadItem::AgentMessage {
+                id: "answer-1".to_string(),
+                text: "authoritative answer".to_string(),
+                phase: None,
+                memory_citation: None,
+            }],
+            TurnStatus::Completed,
+        ));
+    let mut state = BridgeState::empty();
+    state.binding = Some(crate::state::ThreadBinding {
+        self_chat_id: "447700900000@c.us".to_string(),
+        codex_thread_id: "thread-1".to_string(),
+    });
+    state.active_turn = Some(crate::state::ActiveTurn {
+        inbound_message_id: "message-1".to_string(),
+        thread_id: "thread-1".to_string(),
+        codex_turn_id: "turn-1".to_string(),
+        legacy_working_output_message_id: None,
+        attachment_paths: Vec::new(),
+    });
+    let readiness = Arc::new(BridgeReadiness::new(BridgeReadinessSnapshot {
+        ready: true,
+        state_healthy: true,
+        app_server_connected: true,
+        transport_healthy: true,
+    }));
+    let (command_catalog, command_catalog_path) =
+        CommandCatalog::load_or_create(directory.path()).unwrap();
+    let mut coordinator = Coordinator::new(
+        codex,
+        transport.clone(),
+        state,
+        state_path,
+        directory.path().join("attachments"),
+        "447700900000".to_string(),
+        "447700900000@c.us".to_string(),
+        3_500,
+        1_500,
+        20,
+        100,
+        24,
+        command_catalog,
+        command_catalog_path,
+        readiness,
+        true,
+        true,
+    );
+    let (delivery_events, _delivery_event_rx) = mpsc::channel(16);
+    let delivery_worker = DeliveryWorker::new(
+        transport,
+        FileDeliveryStore::new(directory.path().join("delivery.json")),
+        delivery_events,
+        std::time::Duration::from_millis(1),
+    )
+    .await
+    .unwrap();
+    let (delivery, delivery_commands) =
+        DeliveryWorker::<FakeTransport, FileDeliveryStore>::channel(8);
+    coordinator.delivery = Some(delivery.clone());
+    let delivery_task = tokio::spawn(delivery_worker.run(delivery_commands));
+
+    coordinator
+        .handle_event(AppServerEvent::ServerNotification(
+            ServerNotification::TurnCompleted(TurnCompletedNotification {
+                thread_id: "thread-1".to_string(),
+                turn: resume_response_with_turn(Vec::new(), TurnStatus::Completed)
+                    .thread
+                    .turns
+                    .into_iter()
+                    .next()
+                    .unwrap(),
+            }),
+        ))
+        .await;
+
+    wait_for_sent(&sent, 1).await;
+    assert_eq!(
+        *sent.lock().unwrap(),
+        vec!["authoritative answer".to_string()]
+    );
+    assert!(coordinator.state.active_turn.is_none());
+
+    delivery.shutdown().await;
+    delivery_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_disconnect_recovery_delivers_completed_turn_output() {
+    let directory = tempdir().unwrap();
+    let state_path = directory.path().join("state.json");
+    let transport = FakeTransport::default();
+    let sent = Arc::clone(&transport.sent);
+    let codex = FakeCodex::default();
+    codex
+        .resume_response
+        .lock()
+        .unwrap()
+        .replace(resume_response_with_turn(
+            vec![ThreadItem::AgentMessage {
+                id: "answer-1".to_string(),
+                text: "recovered answer".to_string(),
+                phase: None,
+                memory_citation: None,
+            }],
+            TurnStatus::Completed,
+        ));
+    let mut state = BridgeState::empty();
+    state.binding = Some(crate::state::ThreadBinding {
+        self_chat_id: "447700900000@c.us".to_string(),
+        codex_thread_id: "thread-1".to_string(),
+    });
+    state.active_turn = Some(crate::state::ActiveTurn {
+        inbound_message_id: "message-1".to_string(),
+        thread_id: "thread-1".to_string(),
+        codex_turn_id: "turn-1".to_string(),
+        legacy_working_output_message_id: None,
+        attachment_paths: Vec::new(),
+    });
+    let readiness = Arc::new(BridgeReadiness::new(BridgeReadinessSnapshot {
+        ready: true,
+        state_healthy: true,
+        app_server_connected: true,
+        transport_healthy: true,
+    }));
+    let (command_catalog, command_catalog_path) =
+        CommandCatalog::load_or_create(directory.path()).unwrap();
+    let mut coordinator = Coordinator::new(
+        codex,
+        transport.clone(),
+        state,
+        state_path,
+        directory.path().join("attachments"),
+        "447700900000".to_string(),
+        "447700900000@c.us".to_string(),
+        3_500,
+        1_500,
+        20,
+        100,
+        24,
+        command_catalog,
+        command_catalog_path,
+        readiness,
+        true,
+        true,
+    );
+    let (delivery_events, _delivery_event_rx) = mpsc::channel(16);
+    let delivery_worker = DeliveryWorker::new(
+        transport,
+        FileDeliveryStore::new(directory.path().join("delivery.json")),
+        delivery_events,
+        std::time::Duration::from_millis(1),
+    )
+    .await
+    .unwrap();
+    let (delivery, delivery_commands) =
+        DeliveryWorker::<FakeTransport, FileDeliveryStore>::channel(8);
+    coordinator.delivery = Some(delivery.clone());
+    let delivery_task = tokio::spawn(delivery_worker.run(delivery_commands));
+
+    coordinator.mark_disconnected().await;
+    assert!(!coordinator.app_server_connected);
+    assert!(coordinator.state.active_turn.is_some());
+    assert!(coordinator.resume_after_reconnect().await);
+
+    wait_for_sent(&sent, 2).await;
+    assert_eq!(
+        *sent.lock().unwrap(),
+        vec![
+            "[codex] Codex app-server disconnected; queued prompts will resume after reconnection."
+                .to_string(),
+            "recovered answer".to_string(),
+        ]
+    );
+    assert!(coordinator.state.active_turn.is_none());
+
     delivery.shutdown().await;
     delivery_task.await.unwrap();
 }
