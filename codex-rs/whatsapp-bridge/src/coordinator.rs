@@ -727,6 +727,9 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
 
         let recovered =
             matching_turn.map(|turn| self.projector.reconcile_turn(&active.thread_id, turn));
+        let attachment_paths = active.attachment_paths.clone();
+        self.requeue_pending_steers_for_turn(&active.thread_id, &active.codex_turn_id)
+            .await;
         let request_ids = self
             .pending_requests
             .drain()
@@ -750,6 +753,7 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             self.refresh_readiness();
             return;
         }
+        self.remove_attachment_paths(&attachment_paths);
         if let Some(projection) = recovered {
             self.enqueue_projection(projection).await;
         }
@@ -1461,6 +1465,23 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
         {
             return;
         }
+        // A terminal notification is a lifecycle signal, not the durable
+        // transcript source. The event stream can lose the item payload while
+        // the app-server still records the completed turn (for example when
+        // the provider stream reconnects). Reconcile against the authoritative
+        // thread before clearing active state so the final assistant item is
+        // projected and delivered exactly once.
+        if let ServerNotification::TurnCompleted(completed) = &notification {
+            let same_thread = self
+                .state
+                .active_turn
+                .as_ref()
+                .is_some_and(|active| active.thread_id == completed.thread_id);
+            if same_thread {
+                self.reconcile_active_turn().await;
+            }
+            return;
+        }
         let projection = self.projector.apply(notification.clone());
         let (reasoning_status, tooling_status) = notification_statuses(&notification);
         if let Some((thread_id, turn_id)) = notification_turn_scope(&notification) {
@@ -1544,50 +1565,6 @@ impl<C: CodexClient, O: TransportClient + ProviderAdapter + Clone + 'static> Coo
             }
             ServerNotification::ItemCompleted(completed) => {
                 let _ = completed;
-            }
-            ServerNotification::TurnCompleted(completed) => {
-                let is_active = self.state.active_turn.as_ref().is_some_and(|active| {
-                    active.thread_id == completed.thread_id
-                        && active.codex_turn_id == completed.turn.id
-                });
-                if !is_active {
-                    if self
-                        .state
-                        .active_turn
-                        .as_ref()
-                        .is_some_and(|active| active.thread_id == completed.thread_id)
-                    {
-                        self.reconcile_active_turn().await;
-                    }
-                    return;
-                }
-                let attachment_paths = self
-                    .state
-                    .active_turn
-                    .as_ref()
-                    .map(|active| active.attachment_paths.clone())
-                    .unwrap_or_default();
-                self.requeue_pending_steers_for_turn(&completed.thread_id, &completed.turn.id)
-                    .await;
-                self.state.active_turn = None;
-                self.pending_requests.clear();
-                self.state.pending_user_inputs.retain(|pending| {
-                    pending.thread_id != completed.thread_id || pending.turn_id != completed.turn.id
-                });
-                self.pending_approvals.clear();
-                self.file_change_paths.retain(|(thread_id, turn_id, _), _| {
-                    thread_id != &completed.thread_id || turn_id != &completed.turn.id
-                });
-                self.stream_degraded = false;
-                if self.state.save(&self.state_path).is_err() {
-                    self.state_healthy = false;
-                    self.refresh_readiness();
-                    return;
-                }
-                self.remove_attachment_paths(&attachment_paths);
-                if !self.state.queued_prompts.is_empty() {
-                    self.start_next_prompt().await;
-                }
             }
             ServerNotification::Error(error) => {
                 let _ = error;
